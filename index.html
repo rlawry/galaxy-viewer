@@ -87,6 +87,95 @@
       opacity: .9;
       pointer-events: none;
     }
+
+    #mapOverlay {
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      background: rgba(0, 0, 0, .88);
+    }
+
+    #map3d {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+      cursor: grab;
+    }
+
+    #map3d:active {
+      cursor: grabbing;
+    }
+
+    #mapClose {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      background: #181818;
+      color: #ddd;
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 6px 10px;
+    }
+
+    #mapOverlay {
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      background: rgba(0, 0, 0, .88);
+      display: none;
+    }
+
+    #map3d {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+      cursor: grab;
+      z-index: 0;
+    }
+
+    #map3d:active {
+      cursor: grabbing;
+    }
+
+    #mapControls {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      z-index: 2;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      border: 1px solid #333;
+      border-radius: 10px;
+      color: #ddd;
+      background: rgba(20, 20, 20, .85);
+      backdrop-filter: blur(4px);
+    }
+
+    #mapControls label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font: 500 13px system-ui, sans-serif;
+    }
+
+    #mapControls input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      accent-color: #5aa7ff;
+    }
+
+    #mapClose {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      z-index: 2;
+    }
   </style>
 
 </head>
@@ -114,6 +203,7 @@
     <input id="gain" type="range" min="0.25" max="10" step="0.05" value="1">
     <output id="gainOut" class="pill">×1.00</output>
     <label><input id="showLines" type="checkbox"> Show element lines</label>
+    <button id="showMap">Show Map</button>
   </header>
   <canvas id='canvas'></canvas>
   <style>
@@ -226,6 +316,9 @@
       });
       computeGlobalStats();
       current = 0; objSel.value = '0'; applySelection();
+      if (document.getElementById('mapOverlay').style.display !== 'none') {
+        buildMapPoints(); drawMap();
+      }
     }
 
     function applySelection() {
@@ -533,7 +626,7 @@
 
     function setStatus(msg) { statusEl.textContent = msg; }
 
-    objSel.addEventListener('change', () => { gain.value = 1; gain.innerHTML = "1"; current = parseInt(objSel.value, 10); applySelection(); });
+    objSel.addEventListener('change', () => { gain.value = 1; gainOut.textContent = "x1.00"; current = parseInt(objSel.value, 10); applySelection(); });
     modeSel.addEventListener('change', () => { drawLegend(); draw(); });
     applyZBtn.addEventListener('click', () => { drawLegend(); draw(); });
     document.getElementById('open').addEventListener('click', () => fileIn.click());
@@ -556,8 +649,244 @@
 
     resize();
 
+
+    // ---- 3D Sky Map ----
+    let showMapBtn, mapOverlay, mapCanvas, mapClose, mctx;
+    const mapState = { rotX: 0, rotY: 0, scale: 1.2, dragging: false, lx: 0, ly: 0, centerRA: 0, centerDec: 0, pts: [], anim: null };
+
+    window.addEventListener('DOMContentLoaded', () => {
+      const showMapBtn = document.getElementById('showMap');
+      const mapOverlay = document.getElementById('mapOverlay');
+      const mapCanvas = document.getElementById('map3d');
+      const mapClose = document.getElementById('mapClose');
+      const mctx = mapCanvas.getContext('2d');
+
+      const simDist = document.getElementById('simDist');
+
+      // simple Hubble-law distance (low-z)
+      const C_KMS = 299792.458, H0 = 70;  // km/s, km/s/Mpc
+      const zToMpc = z => Math.max(0, (C_KMS / H0) * (Number(z) || 0));
+
+      const mapState = {
+        rotX: 0, rotY: 0,
+        scale: 1.2,                 // zoom
+        dragging: false, lx: 0, ly: 0,
+        centerRA: 0, centerDec: 0,  // radians
+        pts: [],                    // [{x,y,z,label,zval}]
+        anim: null
+      };
+
+      // Helpers
+      const DEG = Math.PI / 180;
+      function rx(a, [x, y, z]) { const s = Math.sin(a), c = Math.cos(a); return [x, c * y - s * z, s * y + c * z]; }
+      function ry(a, [x, y, z]) { const s = Math.sin(a), c = Math.cos(a); return [c * x + s * z, y, -s * x + c * z]; }
+      function rz(a, [x, y, z]) { const s = Math.sin(a), c = Math.cos(a); return [c * x - s * y, s * x + c * y, z]; }
+      function sphToVec(raDeg, decDeg) {
+        const ra = raDeg * DEG, dec = decDeg * DEG;
+        const cd = Math.cos(dec), sd = Math.sin(dec), cr = Math.cos(ra), sr = Math.sin(ra);
+        return [cd * cr, cd * sr, sd];
+      }
+      function resizeMap() {
+        const dpr = window.devicePixelRatio || 1;
+        const rect = mapCanvas.getBoundingClientRect();
+        mapCanvas.width = Math.max(1, Math.floor(rect.width * dpr));
+        mapCanvas.height = Math.max(1, Math.floor(rect.height * dpr));
+        mctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      }
+
+      function buildMapPoints() {
+        // center on currently selected object
+        const d = data[current];
+        let ra0 = 0, dec0 = 0;
+        if (d && Number.isFinite(d.ra_deg) && Number.isFinite(d.dec_deg)) {
+          ra0 = d.ra_deg * DEG;
+          dec0 = d.dec_deg * DEG;
+        }
+        mapState.centerRA = ra0;
+        mapState.centerDec = dec0;
+
+        // distances for all (for normalization)
+        const useDist = !!(simDist && simDist.checked);
+        const dists = data.map(o => (o && Number.isFinite(o.z)) ? zToMpc(o.z) : 0);
+        const maxD = dists.reduce((a, b) => Math.max(a, b), 0);
+
+        mapState.pts = [];
+        for (let i = 0; i < data.length; i++) {
+          const o = data[i];
+          if (!o || !Number.isFinite(o.ra_deg) || !Number.isFinite(o.dec_deg)) continue;
+
+          const v = sphToVec(o.ra_deg, o.dec_deg); // unit vector
+          // pre-rotate so selected is at front
+          let p = rz(-ra0, v);
+          p = rx(-dec0, p);
+
+          const D = dists[i] || 0;
+          // radius: flat shell when off, scaled 0.4..1.0 when on
+          const r = (useDist && maxD > 0) ? (0.4 + 0.6 * (D / maxD)) : 1.0;
+
+          mapState.pts.push({
+            v: p,
+            r,
+            label: (o.name || o.id || 'obj'),
+            zval: Number(o.z) || 0,
+            isCurrent: (i === current)
+          });
+        }
+      }
+
+      function drawMap() {
+        const w = mapCanvas.clientWidth, h = mapCanvas.clientHeight;
+        mctx.clearRect(0, 0, w, h);
+
+        // subtle background
+        const g = mctx.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, Math.hypot(w, h) / 2);
+        g.addColorStop(0, '#0b0b0b'); g.addColorStop(1, '#000');
+        mctx.fillStyle = g; mctx.fillRect(0, 0, w, h);
+
+        const pts2d = [];
+        for (const p of mapState.pts) {
+          // apply user rotation, then radial distance
+          let q = ry(mapState.rotY, rx(mapState.rotX, p.v));
+          q = [q[0] * p.r, q[1] * p.r, q[2] * p.r];
+
+          // correct perspective (front => big)
+          const camZ = 2.8;
+          const z = camZ - q[2];
+          if (z <= 0.05) continue;
+          const f = mapState.scale * Math.min(w, h) * 0.42 / z;
+
+          const x = w * 0.5 + q[0] * f;
+          const y = h * 0.5 - q[1] * f;
+
+          // color by z (blue→white→red), fade back hemisphere
+          const zc = Math.max(-0.01, Math.min(0.05, p.zval));
+          const t = (zc + 0.01) / 0.06;
+          const rr = Math.round(200 * t + 55 * (1 - t));
+          const bb = Math.round(200 * (1 - t) + 55 * t);
+          const a = 0.35 + 0.65 * ((q[2] + 1) * 0.5); // front brighter
+
+          pts2d.push({ x, y, z, r: rr, g: 220, b: bb, a, label: p.label, isCur: p.isCurrent });
+        }
+
+        // sphere rim (unit radius)
+        mctx.strokeStyle = '#222'; mctx.lineWidth = 1;
+        mctx.beginPath();
+        mctx.arc(w / 2, h / 2, Math.min(w, h) * 0.42 * mapState.scale, 0, Math.PI * 2);
+        mctx.stroke();
+
+        // back-to-front
+        pts2d.sort((A, B) => B.z - A.z);
+
+        // draw normals
+        for (const p of pts2d) {
+          if (p.isCur) continue;
+          mctx.fillStyle = `rgba(${p.r},${p.g},${p.b},${p.a.toFixed(3)})`;
+          mctx.beginPath(); mctx.arc(p.x, p.y, 3, 0, Math.PI * 2); mctx.fill();
+        }
+
+        // highlight current
+        const cur = pts2d.find(p => p.isCur);
+        if (cur) {
+          mctx.save();
+          mctx.shadowColor = 'rgba(0,0,0,0.7)'; mctx.shadowBlur = 6;
+          mctx.fillStyle = '#fff';
+          mctx.beginPath(); mctx.arc(cur.x, cur.y, 5, 0, Math.PI * 2); mctx.fill();
+          mctx.lineWidth = 2; mctx.strokeStyle = 'rgba(0,0,0,0.6)'; mctx.stroke();
+          mctx.shadowColor = 'transparent'; mctx.shadowBlur = 0;
+          mctx.font = '600 13px system-ui, sans-serif';
+          mctx.textAlign = 'left'; mctx.textBaseline = 'middle';
+          mctx.fillStyle = '#fff';
+          const label = (data[current]?.name || data[current]?.id || 'current');
+          mctx.fillText(label, cur.x + 10, cur.y);
+          mctx.restore();
+        }
+
+        // crosshair
+        mctx.strokeStyle = 'rgba(255,255,255,.08)';
+        mctx.beginPath();
+        mctx.moveTo(w / 2 - 10, h / 2); mctx.lineTo(w / 2 + 10, h / 2);
+        mctx.moveTo(w / 2, h / 2 - 10); mctx.lineTo(w / 2, h / 2 + 10);
+        mctx.stroke();
+
+        // --- Milky Way center marker ---
+        const cx = w * 0.5, cy = h * 0.5;
+        mctx.save();
+        // dot with subtle outline
+        mctx.fillStyle = '#ffd65a';           // warm gold to stand out
+        mctx.strokeStyle = 'rgba(0,0,0,.6)';
+        mctx.lineWidth = 2;
+        mctx.beginPath(); mctx.arc(cx, cy, 4, 0, Math.PI * 2); mctx.fill(); mctx.stroke();
+
+        // label next to the dot (outlined for readability)
+        const label = 'Milky Way';
+        mctx.font = 'bold 12px system-ui, sans-serif';
+        mctx.textAlign = 'left';
+        mctx.textBaseline = 'middle';
+        mctx.strokeStyle = 'rgba(0,0,0,.7)';
+        mctx.lineWidth = 3;
+        mctx.strokeText(label, cx + 8, cy);
+        mctx.fillStyle = '#fff';
+        mctx.fillText(label, cx + 8, cy);
+        mctx.restore();
+      }
+
+
+      function openMap() {
+        mapOverlay.style.display = 'block';          // show first
+        requestAnimationFrame(() => {                // wait 1 frame so layout exists
+          resizeMap();                               // now clientWidth/Height are > 0
+          buildMapPoints();
+          drawMap();
+        });
+      }
+      function closeMap() {
+        mapOverlay.style.display = 'none';
+        if (mapState.anim) cancelAnimationFrame(mapState.anim);
+      }
+
+      // events
+      showMapBtn.addEventListener('click', openMap);
+      mapClose.addEventListener('click', closeMap);
+      simDist.addEventListener('change', () => {
+        if (mapOverlay.style.display !== 'none') { buildMapPoints(); drawMap(); }
+      });
+      objSel.addEventListener('change', () => {
+        if (mapOverlay.style.display !== 'none') { buildMapPoints(); drawMap(); }
+      });
+      window.addEventListener('resize', () => { if (mapOverlay.style.display !== 'none') { resizeMap(); drawMap(); } });
+      document.addEventListener('keydown', e => { if (e.key === 'Escape' && mapOverlay.style.display !== 'none') closeMap(); });
+
+      mapCanvas.addEventListener('mousedown', e => { mapState.dragging = true; mapState.lx = e.clientX; mapState.ly = e.clientY; });
+      window.addEventListener('mouseup', () => { mapState.dragging = false; });
+      window.addEventListener('mousemove', e => {
+        if (!mapState.dragging) return;
+        const dx = e.clientX - mapState.lx, dy = e.clientY - mapState.ly;
+        mapState.lx = e.clientX; mapState.ly = e.clientY;
+        // adjust sensitivity; clamp X rotation to avoid flipping too fast
+        mapState.rotY += dx * 0.005;
+        mapState.rotX += dy * 0.005;
+        mapState.rotX = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, mapState.rotX));
+        drawMap();
+      });
+      mapCanvas.addEventListener('wheel', e => {
+        e.preventDefault();
+        const dir = e.deltaY > 0 ? +1 : -1;       // down=out, up=in
+        const zstep = 1.1;
+        mapState.scale *= (dir > 0 ? 1 / zstep : zstep);
+        mapState.scale = Math.max(0.6, Math.min(3.0, mapState.scale));
+        drawMap();
+      }, { passive: false });
+    });
+
   </script>
   <div id="cutoutWrap"><img id="cutout" alt="cutout"></div>
+  <div id="mapOverlay" style="display:none">
+    <canvas id="map3d"></canvas>
+    <div id="mapControls">
+      <label><input id="simDist" type="checkbox"> Simulate distance</label>
+    </div>
+    <button id="mapClose" aria-label="Close Map">✕</button>
+  </div>
 </body>
 
 </html>
