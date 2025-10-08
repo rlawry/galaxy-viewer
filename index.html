@@ -66,7 +66,7 @@
 
     /* overlay */
 
-    #aladinWrap {
+    #cutoutWrap {
       position: fixed;
       right: 12px;
       bottom: 12px;
@@ -75,27 +75,21 @@
       border: 1px solid #333;
       border-radius: 10px;
       background: #000;
-      opacity: .9;
       z-index: 20;
-      filter: grayscale(1);
-      pointer-events: none;
-      /* so canvas interactions still work */
+      overflow: hidden;
     }
 
-    #aladin {
+    #cutout {
       width: 100%;
-      height: 100%
-    }
+      height: 100%;
+      object-fit: contain;
 
-    /* force grayscale look */
-    #aladinWrap {
-      filter: grayscale(1);
+      opacity: .9;
+      pointer-events: none;
     }
   </style>
-  <link rel="stylesheet" href="https://aladin.cds.unistra.fr/AladinLite/api/v3/latest/aladin.min.css">
-</head>
 
-<script src="https://aladin.cds.unistra.fr/AladinLite/api/v3/latest/aladin.min.js"></script>
+</head>
 
 <body>
   <header>
@@ -111,6 +105,15 @@
       <button id='open'>Open JSON…</button>
       <span class='pill' id='status'>No file loaded</span>
     </div>
+    <label>Scaling</label>
+    <select id="yscale">
+      <option value="auto">Auto</option>
+      <option value="abs" selected>Absolute</option>
+    </select>
+    <label>Flux scale</label>
+    <input id="gain" type="range" min="0.25" max="10" step="0.05" value="1">
+    <output id="gainOut" class="pill">×1.00</output>
+    <label><input id="showLines" type="checkbox"> Show element lines</label>
   </header>
   <canvas id='canvas'></canvas>
   <style>
@@ -134,6 +137,7 @@
     const openBtn = document.getElementById('open');
     const fileIn = document.getElementById('file');
     const legend = document.getElementById('legend');
+    let hoverNm = null;  // current hover wavelength in nm (or null)
 
     const REST_LINES = [
       //["[O II]", 3727.0],
@@ -155,40 +159,51 @@
 
     let data = []; let view = { xlo: 3500, xhi: 9000, ylo: -1, yhi: 5 }; let current = 0;
 
-    let aladin = null, aladinCat = null;
+    const yScaleSel = document.getElementById('yscale');
+    const gain = document.getElementById('gain');
+    const gainOut = document.getElementById('gainOut');
 
-    const ALADIN_JS = "https://aladin.cds.unistra.fr/AladinLite/api/v3/latest/aladin.min.js";
+    let GLOBAL = { med: 0, mad: 1, qlo: 0, qhi: 0 };
 
-    function ensureAladin(cb) {
-      if (window.A) return cb();
-      const s = document.createElement("script");
-      s.src = ALADIN_JS; s.async = true;
-      s.onload = cb;
-      s.onerror = () => console.error("Failed to load Aladin Lite");
-      document.head.appendChild(s);
+    const VIS_MIN_NM = 380, VIS_MAX_NM = 740;   // visible band
+    function clampXToVisible(xlo, xhi) {
+      let lo = Math.max(VIS_MIN_NM, xlo);
+      let hi = Math.min(VIS_MAX_NM, xhi);
+      if ((hi - lo) < MIN_X_SPAN) {
+        const mid = Math.min(Math.max(0.5 * (xlo + xhi), VIS_MIN_NM + 0.5 * MIN_X_SPAN),
+          VIS_MAX_NM - 0.5 * MIN_X_SPAN);
+        lo = mid - 0.5 * MIN_X_SPAN; hi = mid + 0.5 * MIN_X_SPAN;
+      }
+      return [lo, hi];
     }
 
-    function initAladin() {
-      aladin = A.aladin('#aladin', {
-        survey: 'P/DSS2/red',   // DSS2 single-band, looks grayscale
-        fov: 0.03,              // ~1.8 arcmin
-        showReticle: false,
-        showCooGrid: false,
-      });
-      aladinCat = A.catalog({ name: 'target', color: '#00ff88' });
-      aladin.addCatalog(aladinCat);
+    function computeGlobalStats() {
+      const all = data.flatMap(d => d.flux || []);
+      if (!all.length) { GLOBAL = { med: 0, mad: 1, qlo: -1, qhi: 1 }; return; }
+      const m = median(all);
+      const mad = median(all.map(v => Math.abs(v - m))) || 1;
+      const qlo = percentile(all, 0.01);
+      const qhi = percentile(all, 0.99);
+      GLOBAL = { med: m, mad, qlo, qhi };
     }
 
-    function updateAladin() {
-      const d = data[current];
-      if (!aladin || !d || d.ra_deg == null || d.dec_deg == null) return;
-      aladin.gotoPosition(d.ra_deg, d.dec_deg);
-      aladin.setFoV(0.03);
-      aladinCat.removeAll();
-      aladinCat.addSources(A.marker(d.ra_deg, d.dec_deg, { popupTitle: d.name || '' }));
+    function asinhMap(val, g) {
+      const s = (3 * GLOBAL.mad) / g;              // smaller s => steeper
+      return Math.asinh((val - GLOBAL.med) / s);
     }
 
+    // rename old transformFlux -> transformFluxAuto
+    function transformFluxAuto(f) {
+      const m = median(f);
+      const mad = median(f.map(v => Math.abs(v - m))) || 1;
+      const s = 3 * mad;
+      return f.map(v => Math.asinh((v - m) / s));
+    }
 
+    function transformFluxAbsBase(f) {
+      const s0 = 3 * GLOBAL.mad;
+      return f.map(v => Math.asinh((v - GLOBAL.med) / s0));
+    }
 
     function resize() {
       const dpr = window.devicePixelRatio || 1; canvas.width = Math.floor(canvas.clientWidth * dpr);
@@ -201,33 +216,60 @@
     function loadJSON(obj) {
       data = obj; objSel.innerHTML = '';
       data.forEach((d, i) => {
-        const opt = document.createElement('option'); opt.value = i;
-        opt.textContent = `${d.name}  z=${d.z ?? '?'}`; objSel.appendChild(opt);
+        const opt = document.createElement('option');
+        opt.value = i;
+        const label = (d.name && String(d.name).trim()) ? d.name
+          : (d.id ? d.id : `Obj ${i + 1}`);
+        opt.textContent = `${label}  z=${d.z ?? '?'}`;
+        if (d.id) opt.title = d.id;
+        objSel.appendChild(opt);
       });
+      computeGlobalStats();
       current = 0; objSel.value = '0'; applySelection();
     }
 
     function applySelection() {
-      const d = data[current];
-      const z = Number.isFinite(d.z) ? Number(d.z) : 0;
-      zInput.value = z.toFixed(4);
+      const d = data[current]; if (!d) return;
+      const z = Number.isFinite(d.z) ? Number(d.z) : 0; zInput.value = z.toFixed(4);
 
-      const ft = transformFlux(d.flux);
-      const ql = percentile(ft, 0.01);
-      const qh = percentile(ft, 0.999);   // tighter on the top tail
-      const span = qh - ql;
-      const padTop = 0.25 * span;
-      const padBot = 0.05 * span;
+      [view.xlo, view.xhi] = [VIS_MIN_NM, VIS_MAX_NM];
 
-      const wl_nm = d.wavelength_A.map(w => w * A2NM);
-      view.xlo = Math.min(...wl_nm);
-      view.xhi = Math.max(...wl_nm);
-      view.ylo = ql - padBot;
-      view.yhi = qh + padTop;
+      if (yScaleSel.value === 'abs') {
+        const s0 = 3 * GLOBAL.mad;
+        const y0lo = Math.asinh((GLOBAL.qlo - GLOBAL.med) / s0);
+        const y0hi = Math.asinh((GLOBAL.qhi - GLOBAL.med) / s0);
+        const r = Math.max(Math.abs(y0lo), Math.abs(y0hi));
+        const pad = 0.15 * r;                 // small headroom
+        view.ylo = -(r + pad);
+        view.yhi = +(r + pad);
+      } else {
+        const ft = transformFluxAuto(d.flux);
+        const ql = percentile(ft, 0.01);
+        const qh = percentile(ft, 0.999);
+        const span = qh - ql;
+        view.ylo = ql - 0.05 * span;
+        view.yhi = qh + 0.25 * span;
+      }
 
-      drawLegend();
-      draw();
-      updateAladin();
+      drawLegend(); draw();
+      const img = document.getElementById('cutout');
+      img.src = (d.image && d.image.path) ? d.image.path : "";
+    }
+
+    // Baseline absolute transform (gain-independent)
+    function transformFluxAbsBase(f) {
+      const s0 = 3 * GLOBAL.mad;                // fixed softness
+      return f.map(v => Math.asinh((v - GLOBAL.med) / s0));
+    }
+
+    const VIS_SPAN = VIS_MAX_NM - VIS_MIN_NM;
+    function fitSpanToVisible(center, span) {
+      span = Math.max(MIN_X_SPAN, Math.min(span, VIS_SPAN));
+      let lo = center - 0.5 * span;
+      let hi = center + 0.5 * span;
+      if (lo < VIS_MIN_NM) { lo = VIS_MIN_NM; hi = lo + span; }
+      if (hi > VIS_MAX_NM) { hi = VIS_MAX_NM; lo = hi - span; }
+      return [lo, hi];
     }
 
     function wavelengthToRGB(nm) {
@@ -274,98 +316,224 @@
       }).join('  |  ');
     }
 
+    // === REPLACE your draw() with this ===
     function draw() {
       const d = data[current]; if (!d) return;
-      const wlA = d.wavelength_A;
-      const fl = transformFlux(d.flux);
+
+      // clamp x-range to visible each draw
+      if (typeof clampXToVisible === 'function') {
+        const center = 0.5 * (view.xlo + view.xhi);
+        const span = (view.xhi - view.xlo);
+        [view.xlo, view.xhi] = fitSpanToVisible(center, span);
+      }
+
+      const w = canvas.clientWidth, h = canvas.clientHeight;
+      const L = 40, R = w - 10, T = 10, B = h - 30, W = R - L, H = B - T;
+
       const z = Number(zInput.value) || 0;
       const mode = modeSel.value;
+
+      const wlA = d.wavelength_A;
       const wlObsA = (mode === 'rest') ? wlA.map(w => w / (1 + z)) : wlA;
       const X = wlObsA.map(w => w * A2NM); // nm
 
-      ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
+      const g = parseFloat(gain.value) || 1;
+      const fl = (yScaleSel.value === 'abs')
+        ? transformFluxAbsBase(d.flux).map(v => v * g)   // baseline asinh, then scale
+        : transformFluxAuto(d.flux);
+
+
+      // mappers over the plotting rect
+      const x2 = x => L + (x - view.xlo) / (view.xhi - view.xlo) * W;
+      const y2 = y => B - (y - view.ylo) / (view.yhi - view.ylo) * H;
+
+      ctx.clearRect(0, 0, w, h);
 
       // axes
-      ctx.lineWidth = 1;
-      ctx.strokeStyle = '#333';
-      ctx.beginPath();
-      ctx.moveTo(40, 10);
-      ctx.lineTo(40, canvas.clientHeight - 30);
-      ctx.lineTo(canvas.clientWidth - 10, canvas.clientHeight - 30);
-      ctx.stroke();
+      ctx.lineWidth = 1; ctx.strokeStyle = '#333';
+      ctx.beginPath(); ctx.moveTo(L, T); ctx.lineTo(L, B); ctx.lineTo(R, B); ctx.stroke();
 
-      // spectrum with wavelength-colored segments
+      // spectrum with wavelength-colored segments, clipped to visible band
       let pxPrev = null, pyPrev = null, nmPrev = null;
-      const STEP = 1; // increase to 2–4 for speed
+      const STEP = 1;
       for (let i = 0; i < X.length; i += STEP) {
-        const px = 40 + (x2px(X[i]) - x2px(view.xlo));
-        const py = (y2px(fl[i]) - y2px(view.yhi)) + 10;
         const nm = X[i];
+        if (nm < view.xlo || nm > view.xhi) { pxPrev = pyPrev = nmPrev = null; continue; }
+        const px = x2(nm);
+        const py = y2(fl[i]);
 
         if (pxPrev !== null) {
           const nmMid = 0.5 * (nmPrev + nm);
           const [r, g, b] = wavelengthToRGB(nmMid);
           ctx.strokeStyle = rgb(r, g, b);
-          ctx.beginPath();
-          ctx.moveTo(pxPrev, pyPrev);
-          ctx.lineTo(px, py);
-          ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(pxPrev, pyPrev); ctx.lineTo(px, py); ctx.stroke();
         }
         pxPrev = px; pyPrev = py; nmPrev = nm;
       }
 
       // rest lines + labels (symbol top, nm below)
-      ctx.strokeStyle = '#444'; ctx.fillStyle = '#888';
-      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-      ctx.font = '10px system-ui, sans-serif';
-      for (const [lab, wlA0] of REST_LINES) {
-        const xObsNm = ((mode === "rest") ? wlA0 : wlA0 * (1 + z)) * A2NM;
-        if (xObsNm < view.xlo || xObsNm > view.xhi) continue;
-        const px = 40 + (x2px(xObsNm) - x2px(view.xlo));
-        ctx.beginPath();
-        ctx.moveTo(px, 12);
-        ctx.lineTo(px, canvas.clientHeight - 30);
-        ctx.stroke();
-        ctx.fillText(lab, px, 10);
-        ctx.fillText(`${xObsNm.toFixed(1)} nm`, px, 22);
+      if (showLines.checked) {
+        ctx.strokeStyle = '#444'; ctx.fillStyle = '#888';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+        ctx.font = '10px system-ui, sans-serif';
+        for (const [lab, wlA0] of REST_LINES) {
+          const xObsNm = ((mode === 'rest') ? wlA0 : wlA0 * (1 + z)) * A2NM;
+          if (xObsNm < view.xlo || xObsNm > view.xhi) continue;
+          const px = x2(xObsNm);
+          ctx.beginPath(); ctx.moveTo(px, T + 2); ctx.lineTo(px, B); ctx.stroke();
+          ctx.fillText(lab, px, T); ctx.fillText(`${xObsNm.toFixed(1)} nm`, px, T + 12);
+        }
       }
-
       // labels
       ctx.fillStyle = '#aaa';
-      ctx.textAlign = 'left';
-      ctx.fillText('Flux (arb.)', 8, 24);
-      ctx.textAlign = "right";
-      ctx.fillText(mode === "rest" ? "Rest wavelength (nm)" : "Observed wavelength (nm)",
-        canvas.clientWidth - 12, canvas.clientHeight - 10);
+      ctx.textAlign = 'left'; ctx.fillText('Flux (arb.)', L - 32, T + 14);
+      ctx.textAlign = 'right'; ctx.fillText(mode === 'rest' ? 'Rest wavelength (nm)' : 'Observed wavelength (nm)', R, B + 6);
+
+      // --- hover measuring line ---
+      if (hoverNm !== null && hoverNm >= view.xlo && hoverNm <= view.xhi) {
+        const w = canvas.clientWidth, h = canvas.clientHeight;
+        const L = 40, R = w - 10, T = 10, B = h - 30, W = R - L;
+        const x2 = x => L + (x - view.xlo) / (view.xhi - view.xlo) * W;
+
+        const px = x2(hoverNm);
+
+        const [r, g, b] = wavelengthToRGB(hoverNm);
+        const col = `rgb(${r},${g},${b})`;
+
+        ctx.save();
+
+        // colored vertical line with a soft glow
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 1;
+        ctx.shadowColor = `rgba(${r},${g},${b},0.6)`;
+        ctx.shadowBlur = 6;
+        ctx.beginPath();
+        ctx.moveTo(px, T + 2);
+        ctx.lineTo(px, B);
+        ctx.stroke();
+
+        // wavelength label (outlined for readability), same color as the line
+        const label = `${hoverNm.toFixed(1)} nm`;
+        ctx.font = 'bold 14px system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.shadowColor = 'transparent';
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = 'rgba(0,0,0,0.65)';
+        ctx.strokeText(label, px, B - 2);
+        ctx.fillStyle = col;
+        ctx.fillText(label, px, B - 2);
+
+        ctx.restore();
+      }
     }
+
 
     let dragging = false, lastX = 0, lastY = 0;
     canvas.addEventListener('mousedown', e => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
     window.addEventListener('mouseup', () => dragging = false);
     canvas.addEventListener('mousemove', e => {
-      if (!dragging) return;
-      const dx = e.clientX - lastX, dy = e.clientY - lastY; lastX = e.clientX; lastY = e.clientY;
-      const w = view.xhi - view.xlo, h = view.yhi - view.ylo;
-      const fx = -dx / canvas.clientWidth, fy = dy / canvas.clientHeight;
-      view.xlo += fx * w; view.xhi += fx * w; view.ylo += fy * h; view.yhi += fy * h; draw();
+      updateHover(e);
+      if (dragging) {
+        const dx = e.clientX - lastX, dy = e.clientY - lastY; lastX = e.clientX; lastY = e.clientY;
+        const w = view.xhi - view.xlo, h = view.yhi - view.ylo;
+        const fx = -dx / canvas.clientWidth, fy = dy / canvas.clientHeight;
+        view.xlo += fx * w; view.xhi += fx * w; view.ylo += fy * h; view.yhi += fy * h;
+      }
+      draw();
     });
+    canvas.addEventListener('mouseleave', () => { hoverNm = null; draw(); });
+    canvas.addEventListener('mousedown', e => { dragging = true; lastX = e.clientX; lastY = e.clientY; updateHover(e); });
+    const MIN_X_SPAN = 5;      // nm
+    const MIN_Y_SPAN = 0.02;   // display units after transform
+
+    function zoom1D(lo, hi, center, factor) {
+      const span = (hi - lo) * factor;
+      return [center - 0.5 * span, center + 0.5 * span];
+    }
+    function clampSpan(lo, hi, minSpan) {
+      if ((hi - lo) < minSpan) {
+        const mid = 0.5 * (lo + hi);
+        lo = mid - 0.5 * minSpan; hi = mid + 0.5 * minSpan;
+      }
+      return [lo, hi];
+    }
+
+    function updateHover(e) {
+      const rect = canvas.getBoundingClientRect();
+      const w = canvas.clientWidth, h = canvas.clientHeight;
+      const L = 40, R = w - 10, T = 10, B = h - 30;
+
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      if (x >= L && x <= R && y >= T && y <= B) {
+        const frac = (x - L) / Math.max(1, (R - L));
+        hoverNm = view.xlo + frac * (view.xhi - view.xlo);
+      } else {
+        hoverNm = null;
+      }
+    }
+
+    function wheelDir(e) {
+      // +1 = scroll down, -1 = scroll up
+      if (e.deltaY !== 0) return e.deltaY > 0 ? +1 : -1;
+      if ('wheelDelta' in e && e.wheelDelta !== 0) return e.wheelDelta > 0 ? -1 : +1; // legacy inverted
+      if ('detail' in e && e.detail !== 0) return e.detail > 0 ? +1 : -1;            // very old FF
+      return 0;
+    }
+
     canvas.addEventListener('wheel', e => {
       e.preventDefault();
-      const s = Math.exp(-Math.sign(e.deltaY) * 0.08);
-      const mx = e.clientX / canvas.clientWidth, my = e.clientY / canvas.clientHeight;
-      const xmid = view.xlo + mx * (view.xhi - view.xlo), ymid = view.ylo + (1 - my) * (view.yhi - view.ylo);
-      view.xlo = xmid + (view.xlo - xmid) * s; view.xhi = xmid + (view.xhi - xmid) / s;
-      view.ylo = ymid + (view.ylo - ymid) * s; view.yhi = ymid + (view.yhi - ymid) / s; draw();
+
+      const w = canvas.clientWidth, h = canvas.clientHeight;
+      const L = 40, R = w - 10, T = 10, B = h - 30, W = R - L, H = B - T;
+
+      const mx = Math.min(1, Math.max(0, (e.clientX - canvas.getBoundingClientRect().left - L) / Math.max(1, W)));
+      const my = Math.min(1, Math.max(0, (e.clientY - canvas.getBoundingClientRect().top - T) / Math.max(1, H)));
+
+      const xmid = view.xlo + mx * (view.xhi - view.xlo);
+      const ymid = view.yhi - my * (view.yhi - view.ylo);
+
+      const dirY = wheelDir(e);              // -1 up, +1 down
+      const dirX = Math.sign(e.deltaX || 0); // -1 left, +1 right
+      const ZSTEP = 1.12;
+      const factor = dirY > 0 ? ZSTEP : (dirY < 0 ? 1 / ZSTEP : 1);
+      const panStep = 0.002;
+
+      if (e.shiftKey) {
+        // vertical PAN
+        const dyPan = dirY * panStep * (view.yhi - view.ylo);
+        view.ylo += dyPan; view.yhi += dyPan;
+      } else if (Math.abs(e.deltaX) > Math.abs(e.deltaY) || e.altKey) {
+        // horizontal PAN (preserve span)
+        const span = (view.xhi - view.xlo);
+        const center = 0.5 * (view.xlo + view.xhi) + (dirX || dirY) * panStep * span;
+        [view.xlo, view.xhi] = fitSpanToVisible(center, span);
+      } else if (factor !== 1) {
+        // horizontal ZOOM about cursor (preserve span; allow edge expansion)
+        const curSpan = (view.xhi - view.xlo);
+        const newSpan = curSpan * factor;          // >1 = zoom OUT, <1 = zoom IN
+        [view.xlo, view.xhi] = fitSpanToVisible(xmid, newSpan);
+      }
+      draw();
     }, { passive: false });
-    canvas.addEventListener("click", (e) => {
-      const xnm = view.xlo + (e.clientX / canvas.clientWidth) * (view.xhi - view.xlo);
-      const y = view.yhi - (e.clientY / canvas.clientHeight) * (view.yhi - view.ylo);
-      setStatus(`${modeSel.value === 'rest' ? 'Rest λ' : 'Obs λ'} = ${xnm.toFixed(1)} nm,  Flux = ${y.toFixed(2)}`);
+
+
+
+    yScaleSel.addEventListener('change', () => applySelection());
+    gain.addEventListener('input', () => {
+      gainOut.textContent = '×' + (parseFloat(gain.value) || 1).toFixed(2);
+      if (yScaleSel.value === 'abs') {
+        const half = 0.5 * (view.yhi - view.ylo);
+        view.ylo = -half; view.yhi = half;   // centre around 0
+      }
+      draw();
     });
 
     function setStatus(msg) { statusEl.textContent = msg; }
 
-    objSel.addEventListener('change', () => { current = parseInt(objSel.value, 10); applySelection(); });
+    objSel.addEventListener('change', () => { gain.value = 1; gain.innerHTML = "1"; current = parseInt(objSel.value, 10); applySelection(); });
     modeSel.addEventListener('change', () => { drawLegend(); draw(); });
     applyZBtn.addEventListener('click', () => { drawLegend(); draw(); });
     document.getElementById('open').addEventListener('click', () => fileIn.click());
@@ -383,16 +551,13 @@
     }).then(obj => { loadJSON(obj); setStatus('Loaded spectra.json'); })
       .catch(() => setStatus('No local spectra.json. Use Open JSON.'));
 
-    window.addEventListener("DOMContentLoaded", () => {
-      ensureAladin(() => { initAladin(); updateAladin(); });
-    });
+    const showLines = document.getElementById('showLines');
+    showLines.addEventListener('change', draw);
 
     resize();
 
   </script>
-  <div id="aladinWrap">
-    <div id="aladin"></div>
-  </div>
+  <div id="cutoutWrap"><img id="cutout" alt="cutout"></div>
 </body>
 
 </html>
