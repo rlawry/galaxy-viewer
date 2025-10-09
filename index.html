@@ -88,6 +88,24 @@
       pointer-events: none;
     }
 
+    #cutoutCaption {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      padding: 6px 10px;
+      font: 600 12px/1.2 system-ui, sans-serif;
+      color: #eee;
+      text-align: right;
+      /* bottom-right, per your spec */
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, .7);
+      background: linear-gradient(to top, rgba(0, 0, 0, .55), rgba(0, 0, 0, 0));
+      pointer-events: none;
+    }
+
     #mapOverlay {
       position: fixed;
       inset: 0;
@@ -135,6 +153,8 @@
       display: block;
       cursor: grab;
       z-index: 0;
+      touch-action: none;
+      /* disable browser panning/zoom so we handle it */
     }
 
     #map3d:active {
@@ -253,6 +273,33 @@
     const gain = document.getElementById('gain');
     const gainOut = document.getElementById('gainOut');
 
+    // --- ABS Y envelope (center-lock) ---
+    let ABS_BASE_R = 1;          // baseline half-span at gain=1 (transformed units)
+    const ABS_PAD_FRAC = 0.20;   // 20% headroom
+
+    function recomputeAbsEnvelope() {
+      const s0 = 3 * (GLOBAL.mad || 1);
+      const y0lo = Math.asinh((GLOBAL.qlo - GLOBAL.med) / s0);
+      const y0hi = Math.asinh((GLOBAL.qhi - GLOBAL.med) / s0);
+      ABS_BASE_R = Math.max(Math.abs(y0lo), Math.abs(y0hi)) || 1;
+    }
+
+    function updateAbsYRangeForGain(g) {
+      const baseHalf = ABS_BASE_R * (1 + ABS_PAD_FRAC);   // constant envelope (gain=1)
+      const d = data[current];
+      if (!d || !d.flux) { view.ylo = -baseHalf; view.yhi = baseHalf; return; }
+
+      // predict amplitude at this gain in ABS transform
+      const ft = transformFluxAbsBase(d.flux);            // zero-centered, gain-independent
+      const mags = ft.map(v => Math.abs(v * g));
+      const q = percentile(mags, 0.995);                  // ignore outliers
+
+      // keep centered at 0; expand just enough if needed (but not in proportion to g)
+      const half = Math.min(Math.max(baseHalf, q * 1.10), ABS_BASE_R * 6);
+      view.ylo = -half;
+      view.yhi = half;
+    }
+
     let GLOBAL = { med: 0, mad: 1, qlo: 0, qhi: 0 };
 
     const VIS_MIN_NM = 380, VIS_MAX_NM = 740;   // visible band
@@ -267,14 +314,26 @@
       return [lo, hi];
     }
 
+    function idxToLetters(i) { // 0 -> A, 25 -> Z, 26 -> AA ...
+      let s = ""; i += 1;
+      while (i > 0) {
+        const r = (i - 1) % 26;
+        s = String.fromCharCode(65 + r) + s;
+        i = Math.floor((i - 1) / 26);
+      }
+      return s;
+    }
+
     function computeGlobalStats() {
       const all = data.flatMap(d => d.flux || []);
-      if (!all.length) { GLOBAL = { med: 0, mad: 1, qlo: -1, qhi: 1 }; return; }
+      if (!all.length) { GLOBAL = { med: 0, mad: 1, qlo: -1, qhi: 1 }; ABS_BASE_R = 1; return; }
       const m = median(all);
       const mad = median(all.map(v => Math.abs(v - m))) || 1;
-      const qlo = percentile(all, 0.01);
-      const qhi = percentile(all, 0.99);
+      // wider tails to avoid clipping tall spectra
+      const qlo = percentile(all, 0.001);
+      const qhi = percentile(all, 0.999);
       GLOBAL = { med: m, mad, qlo, qhi };
+      recomputeAbsEnvelope();
     }
 
     function asinhMap(val, g) {
@@ -303,19 +362,51 @@
 
     function setStatus(msg) { statusEl.textContent = msg; }
 
+    // Stable 32-bit FNV-1a hash
+    function fnv1a(str) {
+      let h = 0x811c9dc5;
+      for (let i = 0; i < str.length; i++) {
+        h ^= str.charCodeAt(i);
+        h += (h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24);
+      }
+      return h >>> 0; // unsigned
+    }
+
+    // Change this to get a new (still-fixed) shuffle
+    const SHUFFLE_SALT = 'galaxy-shuffle-v1';
+
+    // Returns a permutation of indices in a deterministic pseudo-random order
+    function stableShuffleOrder(arr) {
+      const rows = arr.map((d, i) => {
+        const key = String(d.id ?? d.name ?? i);
+        const hash = fnv1a(SHUFFLE_SALT + '|' + key);
+        return { i, hash };
+      });
+      rows.sort((a, b) => (a.hash - b.hash) || (a.i - b.i)); // tie-break by original index
+      return rows.map(r => r.i);
+    }
+
     function loadJSON(obj) {
-      data = obj; objSel.innerHTML = '';
+      // apply deterministic shuffle
+      const order = stableShuffleOrder(obj);
+      data = order.map(i => obj[i]);
+
+      objSel.innerHTML = '';
       data.forEach((d, i) => {
         const opt = document.createElement('option');
         opt.value = i;
-        const label = (d.name && String(d.name).trim()) ? d.name
+        const origName = (d.name && String(d.name).trim())
+          ? d.name
           : (d.id ? d.id : `Obj ${i + 1}`);
-        opt.textContent = `${label}  z=${d.z ?? '?'}`;
-        if (d.id) opt.title = d.id;
+        const galLabel = `Galaxy ${idxToLetters(i)}`; // A, B, C...
+        opt.textContent = galLabel;
+        opt.title = origName; // tooltip shows the real name
         objSel.appendChild(opt);
       });
+
       computeGlobalStats();
       current = 0; objSel.value = '0'; applySelection();
+
       if (document.getElementById('mapOverlay').style.display !== 'none') {
         buildMapPoints(); drawMap();
       }
@@ -328,17 +419,10 @@
       [view.xlo, view.xhi] = [VIS_MIN_NM, VIS_MAX_NM];
 
       if (yScaleSel.value === 'abs') {
-        const s0 = 3 * GLOBAL.mad;
-        const y0lo = Math.asinh((GLOBAL.qlo - GLOBAL.med) / s0);
-        const y0hi = Math.asinh((GLOBAL.qhi - GLOBAL.med) / s0);
-        const r = Math.max(Math.abs(y0lo), Math.abs(y0hi));
-        const pad = 0.15 * r;                 // small headroom
-        view.ylo = -(r + pad);
-        view.yhi = +(r + pad);
+        updateAbsYRangeForGain(parseFloat(gain.value) || 1);
       } else {
         const ft = transformFluxAuto(d.flux);
-        const ql = percentile(ft, 0.01);
-        const qh = percentile(ft, 0.999);
+        const ql = percentile(ft, 0.01), qh = percentile(ft, 0.999);
         const span = qh - ql;
         view.ylo = ql - 0.05 * span;
         view.yhi = qh + 0.25 * span;
@@ -347,6 +431,10 @@
       drawLegend(); draw();
       const img = document.getElementById('cutout');
       img.src = (d.image && d.image.path) ? d.image.path : "";
+
+      const cutoutCaption = document.getElementById('cutoutCaption');
+      const origName = (d.name && String(d.name).trim()) ? d.name : (d.id || '');
+      cutoutCaption.textContent = origName || '';  // blank if unknown
     }
 
     // Baseline absolute transform (gain-independent)
@@ -529,9 +617,10 @@
       updateHover(e);
       if (dragging) {
         const dx = e.clientX - lastX, dy = e.clientY - lastY; lastX = e.clientX; lastY = e.clientY;
-        const w = view.xhi - view.xlo, h = view.yhi - view.ylo;
+        const wx = view.xhi - view.xlo, wy = view.yhi - view.ylo;
         const fx = -dx / canvas.clientWidth, fy = dy / canvas.clientHeight;
-        view.xlo += fx * w; view.xhi += fx * w; view.ylo += fy * h; view.yhi += fy * h;
+        view.xlo += fx * wx; view.xhi += fx * wx;
+        if (yScaleSel.value !== 'abs') { view.ylo += fy * wy; view.yhi += fy * wy; } // no Y-pan in ABS
       }
       draw();
     });
@@ -595,32 +684,25 @@
       const panStep = 0.002;
 
       if (e.shiftKey) {
-        // vertical PAN
-        const dyPan = dirY * panStep * (view.yhi - view.ylo);
-        view.ylo += dyPan; view.yhi += dyPan;
-      } else if (Math.abs(e.deltaX) > Math.abs(e.deltaY) || e.altKey) {
-        // horizontal PAN (preserve span)
-        const span = (view.xhi - view.xlo);
-        const center = 0.5 * (view.xlo + view.xhi) + (dirX || dirY) * panStep * span;
-        [view.xlo, view.xhi] = fitSpanToVisible(center, span);
-      } else if (factor !== 1) {
-        // horizontal ZOOM about cursor (preserve span; allow edge expansion)
-        const curSpan = (view.xhi - view.xlo);
-        const newSpan = curSpan * factor;          // >1 = zoom OUT, <1 = zoom IN
-        [view.xlo, view.xhi] = fitSpanToVisible(xmid, newSpan);
+        if (yScaleSel.value !== 'abs') {
+          const dyPan = dirY * panStep * (view.yhi - view.ylo);
+          view.ylo += dyPan; view.yhi += dyPan;
+        }
       }
       draw();
     }, { passive: false });
 
 
 
-    yScaleSel.addEventListener('change', () => applySelection());
+    yScaleSel.addEventListener('change', () => {
+      if (yScaleSel.value === 'abs') updateAbsYRangeForGain(parseFloat(gain.value) || 1);
+      else applySelection();  // recompute auto range
+      draw();
+    });
     gain.addEventListener('input', () => {
-      gainOut.textContent = '×' + (parseFloat(gain.value) || 1).toFixed(2);
-      if (yScaleSel.value === 'abs') {
-        const half = 0.5 * (view.yhi - view.ylo);
-        view.ylo = -half; view.yhi = half;   // centre around 0
-      }
+      const g = parseFloat(gain.value) || 1;
+      gainOut.textContent = '×' + g.toFixed(2);
+      if (yScaleSel.value === 'abs') updateAbsYRangeForGain(g);
       draw();
     });
 
@@ -844,7 +926,83 @@
         if (mapState.anim) cancelAnimationFrame(mapState.anim);
       }
 
+
+
       // events
+      // ---- TOUCH support: one finger rotate, two fingers pinch-zoom ----
+      let touchMode = 'none';
+      let pinchPrevDist = 0;
+
+      function touchDist(touches) {
+        const dx = touches[0].clientX - touches[1].clientX;
+        const dy = touches[0].clientY - touches[1].clientY;
+        return Math.hypot(dx, dy);
+      }
+
+      mapCanvas.addEventListener('touchstart', e => {
+        if (e.touches.length === 1) {
+          // rotate
+          touchMode = 'rotate';
+          mapState.dragging = true;
+          mapState.lx = e.touches[0].clientX;
+          mapState.ly = e.touches[0].clientY;
+        } else if (e.touches.length >= 2) {
+          // pinch
+          touchMode = 'pinch';
+          mapState.dragging = false;
+          pinchPrevDist = touchDist(e.touches);
+        }
+        e.preventDefault();
+      }, { passive: false });
+
+      mapCanvas.addEventListener('touchmove', e => {
+        if (touchMode === 'rotate' && e.touches.length === 1) {
+          const t = e.touches[0];
+          const dx = t.clientX - mapState.lx;
+          const dy = t.clientY - mapState.ly;
+          mapState.lx = t.clientX;
+          mapState.ly = t.clientY;
+
+          mapState.rotY += dx * 0.005;
+          mapState.rotX += dy * 0.005;
+          mapState.rotX = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, mapState.rotX));
+          drawMap();
+        } else if (e.touches.length >= 2) {
+          // pinch zoom
+          const d = touchDist(e.touches);
+          if (pinchPrevDist > 0) {
+            const factor = d / pinchPrevDist;          // >1 zoom in, <1 zoom out
+            mapState.scale *= factor;
+            mapState.scale = Math.max(0.6, Math.min(3.0, mapState.scale));
+            drawMap();
+          }
+          pinchPrevDist = d;
+        }
+        e.preventDefault();
+      }, { passive: false });
+
+      mapCanvas.addEventListener('touchend', e => {
+        if (e.touches.length === 0) {
+          touchMode = 'none';
+          mapState.dragging = false;
+          pinchPrevDist = 0;
+        } else if (e.touches.length === 1) {
+          // fall back to rotate with remaining finger
+          touchMode = 'rotate';
+          mapState.dragging = true;
+          mapState.lx = e.touches[0].clientX;
+          mapState.ly = e.touches[0].clientY;
+          pinchPrevDist = 0;
+        }
+        e.preventDefault();
+      }, { passive: false });
+
+      mapCanvas.addEventListener('touchcancel', () => {
+        touchMode = 'none';
+        mapState.dragging = false;
+        pinchPrevDist = 0;
+      }, { passive: false });
+
       showMapBtn.addEventListener('click', openMap);
       mapClose.addEventListener('click', closeMap);
       simDist.addEventListener('change', () => {
@@ -879,7 +1037,10 @@
     });
 
   </script>
-  <div id="cutoutWrap"><img id="cutout" alt="cutout"></div>
+  <div id="cutoutWrap">
+    <img id="cutout" alt="cutout">
+    <div id="cutoutCaption" aria-live="polite"></div>
+  </div>
   <div id="mapOverlay" style="display:none">
     <canvas id="map3d"></canvas>
     <div id="mapControls">
