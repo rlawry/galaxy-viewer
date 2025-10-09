@@ -220,8 +220,8 @@
       <option value="abs" selected>Absolute</option>
     </select>
     <label>Flux scale</label>
-    <input id="gain" type="range" min="0.25" max="10" step="0.05" value="1">
-    <output id="gainOut" class="pill">×1.00</output>
+    <input id="gain" type="range" min="0.01" max="2" step="0.01" value="0.50">
+    <output id="gainOut" class="pill">×0.50</output>
     <label><input id="showLines" type="checkbox"> Show element lines</label>
     <button id="showMap">Show Map</button>
   </header>
@@ -249,6 +249,12 @@
     const legend = document.getElementById('legend');
     let hoverNm = null;  // current hover wavelength in nm (or null)
 
+    // ---- wavelength scale (draggable) ----
+    let scaleY = null;           // pixel Y of the scale baseline; null ⇒ default at B
+    let draggingScale = false;
+    let scaleGrabOffset = 0;     // mouse Y offset when grabbing the scale
+
+
     const REST_LINES = [
       //["[O II]", 3727.0],
       ["Hδ", 4101.74],
@@ -273,34 +279,40 @@
     const gain = document.getElementById('gain');
     const gainOut = document.getElementById('gainOut');
 
-    // --- ABS Y envelope (center-lock) ---
-    let ABS_BASE_R = 1;          // baseline half-span at gain=1 (transformed units)
-    const ABS_PAD_FRAC = 0.20;   // 20% headroom
+    // --- ABS envelope (fixed y-window, center-locked) ---
+    let GLOBAL = { med: 0, mad: 1, qlo: 0, qhi: 0 };
+    let ABS_BASE_R = 1;               // half-height in transformed units
+    const ABS_PAD_FRAC = 0.20;
 
-    function recomputeAbsEnvelope() {
-      const s0 = 3 * (GLOBAL.mad || 1);
+    function computeGlobalStats() {
+      const all = data.flatMap(d => d.flux || []);
+      if (!all.length) { GLOBAL = { med: 0, mad: 1, qlo: -1, qhi: 1 }; ABS_BASE_R = 1; return; }
+      const m = median(all);
+      const mad = median(all.map(v => Math.abs(v - m))) || 1;
+      const qlo = percentile(all, 0.001);
+      const qhi = percentile(all, 0.999);
+      GLOBAL = { med: m, mad, qlo, qhi };
+      // compute fixed y envelope from global extremes in asinh space
+      const s0 = 3 * GLOBAL.mad;
       const y0lo = Math.asinh((GLOBAL.qlo - GLOBAL.med) / s0);
       const y0hi = Math.asinh((GLOBAL.qhi - GLOBAL.med) / s0);
       ABS_BASE_R = Math.max(Math.abs(y0lo), Math.abs(y0hi)) || 1;
     }
 
-    function updateAbsYRangeForGain(g) {
-      const baseHalf = ABS_BASE_R * (1 + ABS_PAD_FRAC);   // constant envelope (gain=1)
-      const d = data[current];
-      if (!d || !d.flux) { view.ylo = -baseHalf; view.yhi = baseHalf; return; }
-
-      // predict amplitude at this gain in ABS transform
-      const ft = transformFluxAbsBase(d.flux);            // zero-centered, gain-independent
-      const mags = ft.map(v => Math.abs(v * g));
-      const q = percentile(mags, 0.995);                  // ignore outliers
-
-      // keep centered at 0; expand just enough if needed (but not in proportion to g)
-      const half = Math.min(Math.max(baseHalf, q * 1.10), ABS_BASE_R * 6);
+    function updateAbsYRange() {
+      const half = ABS_BASE_R * (1 + ABS_PAD_FRAC);  // fixed, independent of slider
       view.ylo = -half;
       view.yhi = half;
     }
 
-    let GLOBAL = { med: 0, mad: 1, qlo: 0, qhi: 0 };
+    function setYFromTransformed(ft) {
+      if (!ft.length) { view.ylo = -1; view.yhi = 1; return; }
+      const ql = percentile(ft, 0.01), qh = percentile(ft, 0.99);
+      const pad = 0.10 * (qh - ql);
+      view.ylo = ql - pad;
+      view.yhi = qh + pad;
+    }
+
 
     const VIS_MIN_NM = 380, VIS_MAX_NM = 740;   // visible band
     function clampXToVisible(xlo, xhi) {
@@ -324,25 +336,8 @@
       return s;
     }
 
-    function computeGlobalStats() {
-      const all = data.flatMap(d => d.flux || []);
-      if (!all.length) { GLOBAL = { med: 0, mad: 1, qlo: -1, qhi: 1 }; ABS_BASE_R = 1; return; }
-      const m = median(all);
-      const mad = median(all.map(v => Math.abs(v - m))) || 1;
-      // wider tails to avoid clipping tall spectra
-      const qlo = percentile(all, 0.001);
-      const qhi = percentile(all, 0.999);
-      GLOBAL = { med: m, mad, qlo, qhi };
-      recomputeAbsEnvelope();
-    }
-
-    function asinhMap(val, g) {
-      const s = (3 * GLOBAL.mad) / g;              // smaller s => steeper
-      return Math.asinh((val - GLOBAL.med) / s);
-    }
-
-    // rename old transformFlux -> transformFluxAuto
     function transformFluxAuto(f) {
+      if (!f?.length) return [];
       const m = median(f);
       const mad = median(f.map(v => Math.abs(v - m))) || 1;
       const s = 3 * mad;
@@ -351,8 +346,9 @@
 
     function transformFluxAbsBase(f) {
       const s0 = 3 * GLOBAL.mad;
-      return f.map(v => Math.asinh((v - GLOBAL.med) / s0));
+      return f.map(v => Math.asinh((v - GLOBAL.med) / s0)); // centered at 0
     }
+
 
     function resize() {
       const dpr = window.devicePixelRatio || 1; canvas.width = Math.floor(canvas.clientWidth * dpr);
@@ -361,6 +357,115 @@
     window.addEventListener('resize', resize);
 
     function setStatus(msg) { statusEl.textContent = msg; }
+
+    function getPlotRect() {
+      const w = canvas.clientWidth, h = canvas.clientHeight;
+      const L = 40, R = w - 10, T = 10, B = h - 30;
+      return { L, R, T, B, W: R - L, H: B - T };
+    }
+    function hitScaleAt(x, y) {
+      const { L, R, T, B } = getPlotRect();
+      const y0 = (scaleY == null ? B : scaleY);
+      return x >= L && x <= R && Math.abs(y - y0) <= 12;
+    }
+
+    function drawWavelengthScale(L, R, T, B, W) {
+      // choose baseline (default at bottom axis B), and clamp within plot
+      const baseY = scaleY == null ? B : Math.max(T + 12, Math.min(B, scaleY));
+      scaleY = baseY;
+
+      const spanNm = Math.max(1e-6, (view.xhi - view.xlo));
+      const pxPerNm = W / spanNm;
+
+      // major = 10 nm (always)
+      const MAJOR = 10;
+
+      // minor: prefer 1 nm if roomy, else 2 nm, else 5 nm (fallback none if too tight)
+      const MIN_MINOR_PX = 10;
+      let minor = null;
+      if (pxPerNm * 1 >= MIN_MINOR_PX) minor = 1;
+      else if (pxPerNm * 2 >= MIN_MINOR_PX) minor = 2;
+      else if (pxPerNm * 5 >= MIN_MINOR_PX) minor = 5;
+
+      // tertiary: only if it adds value
+      const MIN_TERT_PX = 6;
+      let tertiary = null;
+      if (minor === 5 && pxPerNm * 1 >= MIN_TERT_PX) tertiary = 1;
+      else if (minor === 1 && pxPerNm * 0.5 >= MIN_TERT_PX) tertiary = 0.5;
+
+      const nm2x = nm => L + (nm - view.xlo) / spanNm * W;
+
+      // baseline
+      ctx.strokeStyle = '#444';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(L, baseY);
+      ctx.lineTo(R, baseY);
+      ctx.stroke();
+
+      // tertiary ticks (smallest)
+      if (tertiary) {
+        ctx.strokeStyle = '#2a2a2a';
+        ctx.lineWidth = 1;
+        let n0 = Math.ceil(view.xlo / tertiary) * tertiary;
+        for (let nm = n0; nm <= view.xhi; nm += tertiary) {
+          const x = nm2x(nm);
+          if (x < L - 1 || x > R + 1) continue;
+          ctx.beginPath();
+          ctx.moveTo(x, baseY);
+          ctx.lineTo(x, baseY - 3);
+          ctx.stroke();
+        }
+      }
+
+      // minor ticks
+      if (minor) {
+        ctx.strokeStyle = '#555';
+        ctx.lineWidth = 1;
+        let n0 = Math.ceil(view.xlo / minor) * minor;
+        for (let nm = n0; nm <= view.xhi; nm += minor) {
+          if (MAJOR && (nm % MAJOR === 0)) continue; // major will draw on top
+          const x = nm2x(nm);
+          if (x < L - 1 || x > R + 1) continue;
+          ctx.beginPath();
+          ctx.moveTo(x, baseY);
+          ctx.lineTo(x, baseY - 6);
+          ctx.stroke();
+        }
+      }
+
+      // major ticks + labels (avoid label overlap if too tight)
+      ctx.strokeStyle = '#888';
+      ctx.lineWidth = 1.25;
+      ctx.fillStyle = '#bbb';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.font = '10px system-ui, sans-serif';
+
+      let labelStep = MAJOR;            // try every 10 nm
+      const MIN_LABEL_PX = 34;          // if tighter, relax labels but keep 10-nm big ticks
+      if (pxPerNm * labelStep < MIN_LABEL_PX) labelStep = 20;
+      if (pxPerNm * labelStep < MIN_LABEL_PX) labelStep = 50;
+      if (pxPerNm * labelStep < MIN_LABEL_PX) labelStep = 100;
+
+      let n0 = Math.ceil(view.xlo / MAJOR) * MAJOR;
+      for (let nm = n0; nm <= view.xhi; nm += MAJOR) {
+        const x = nm2x(nm);
+        if (x < L - 1 || x > R + 1) continue;
+
+        // tick
+        ctx.beginPath();
+        ctx.moveTo(x, baseY);
+        ctx.lineTo(x, baseY - 9);
+        ctx.stroke();
+
+        // label (above tick)
+        if (nm % labelStep === 0) {
+          ctx.fillText(String(Math.round(nm)), x, baseY - 10);
+        }
+      }
+    }
+
 
     // Stable 32-bit FNV-1a hash
     function fnv1a(str) {
@@ -414,28 +519,32 @@
 
     function applySelection() {
       const d = data[current]; if (!d) return;
-      const z = Number.isFinite(d.z) ? Number(d.z) : 0; zInput.value = z.toFixed(4);
+
+      const z = Number.isFinite(d.z) ? Number(d.z) : 0;
+      zInput.value = z.toFixed(4);
 
       [view.xlo, view.xhi] = [VIS_MIN_NM, VIS_MAX_NM];
 
       if (yScaleSel.value === 'abs') {
-        updateAbsYRangeForGain(parseFloat(gain.value) || 1);
+        updateAbsYRange();                    // fixed Y window
       } else {
-        const ft = transformFluxAuto(d.flux);
+        const ft = transformFluxAuto(d.flux || []);
         const ql = percentile(ft, 0.01), qh = percentile(ft, 0.999);
-        const span = qh - ql;
+        const span = qh - ql || 1;
         view.ylo = ql - 0.05 * span;
         view.yhi = qh + 0.25 * span;
       }
 
-      drawLegend(); draw();
+      // cutout + caption
       const img = document.getElementById('cutout');
       img.src = (d.image && d.image.path) ? d.image.path : "";
-
       const cutoutCaption = document.getElementById('cutoutCaption');
-      const origName = (d.name && String(d.name).trim()) ? d.name : (d.id || '');
-      cutoutCaption.textContent = origName || '';  // blank if unknown
+      cutoutCaption.textContent = (d.name && String(d.name).trim()) ? d.name : (d.id || '');
+
+      drawLegend();
+      draw();
     }
+
 
     // Baseline absolute transform (gain-independent)
     function transformFluxAbsBase(f) {
@@ -497,7 +606,6 @@
       }).join('  |  ');
     }
 
-    // === REPLACE your draw() with this ===
     function draw() {
       const d = data[current]; if (!d) return;
 
@@ -520,7 +628,7 @@
 
       const g = parseFloat(gain.value) || 1;
       const fl = (yScaleSel.value === 'abs')
-        ? transformFluxAbsBase(d.flux).map(v => v * g)   // baseline asinh, then scale
+        ? transformFluxAbsBase(d.flux).map(v => v * g)   // slider acts here
         : transformFluxAuto(d.flux);
 
 
@@ -533,6 +641,13 @@
       // axes
       ctx.lineWidth = 1; ctx.strokeStyle = '#333';
       ctx.beginPath(); ctx.moveTo(L, T); ctx.lineTo(L, B); ctx.lineTo(R, B); ctx.stroke();
+
+      // axes
+      ctx.lineWidth = 1; ctx.strokeStyle = '#333';
+      ctx.beginPath(); ctx.moveTo(L, T); ctx.lineTo(L, B); ctx.lineTo(R, B); ctx.stroke();
+
+      // wavelength scale (draggable baseline)
+      drawWavelengthScale(L, R, T, B, W);
 
       // spectrum with wavelength-colored segments, clipped to visible band
       let pxPrev = null, pyPrev = null, nmPrev = null;
@@ -610,22 +725,81 @@
     }
 
 
-    let dragging = false, lastX = 0, lastY = 0;
-    canvas.addEventListener('mousedown', e => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
-    window.addEventListener('mouseup', () => dragging = false);
-    canvas.addEventListener('mousemove', e => {
+    let draggingPlot = false, lastX = 0, lastY = 0;
+
+    // MOUSE
+    canvas.addEventListener('mousedown', e => {
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      if (hitScaleAt(x, y)) {
+        draggingScale = true;
+        const { B } = getPlotRect();
+        scaleGrabOffset = (scaleY == null ? B : scaleY) - y;
+        e.preventDefault(); e.stopPropagation();
+        return;
+      }
+
+      // start plot drag
+      draggingPlot = true;
+      lastX = e.clientX; lastY = e.clientY;
       updateHover(e);
-      if (dragging) {
-        const dx = e.clientX - lastX, dy = e.clientY - lastY; lastX = e.clientX; lastY = e.clientY;
+    }, { passive: false });
+
+    window.addEventListener('mousemove', e => {
+      if (draggingScale) {
+        const rect = canvas.getBoundingClientRect();
+        const y = e.clientY - rect.top;
+        const { T, B } = getPlotRect();
+        scaleY = Math.max(T + 12, Math.min(B, y + scaleGrabOffset));
+        draw();
+        return;
+      }
+      if (draggingPlot) {
+        const dx = e.clientX - lastX, dy = e.clientY - lastY;
+        lastX = e.clientX; lastY = e.clientY;
+
         const wx = view.xhi - view.xlo, wy = view.yhi - view.ylo;
         const fx = -dx / canvas.clientWidth, fy = dy / canvas.clientHeight;
         view.xlo += fx * wx; view.xhi += fx * wx;
-        if (yScaleSel.value !== 'abs') { view.ylo += fy * wy; view.yhi += fy * wy; } // no Y-pan in ABS
+        if (yScaleSel.value !== 'abs') { view.ylo += fy * wy; view.yhi += fy * wy; }
+        draw();
       }
-      draw();
     });
+
+    window.addEventListener('mouseup', () => { draggingPlot = false; draggingScale = false; });
+
+    canvas.addEventListener('mousemove', e => { updateHover(e); }); // hover only
     canvas.addEventListener('mouseleave', () => { hoverNm = null; draw(); });
-    canvas.addEventListener('mousedown', e => { dragging = true; lastX = e.clientX; lastY = e.clientY; updateHover(e); });
+
+    // TOUCH (scale dragging only; won’t interfere with plot handlers)
+    canvas.addEventListener('touchstart', e => {
+      const rect = canvas.getBoundingClientRect();
+      const t = e.touches[0];
+      const x = t.clientX - rect.left, y = t.clientY - rect.top;
+      if (hitScaleAt(x, y)) {
+        draggingScale = true;
+        const { B } = getPlotRect();
+        scaleGrabOffset = (scaleY == null ? B : scaleY) - y;
+        e.preventDefault(); e.stopPropagation();
+      }
+    }, { passive: false });
+
+    canvas.addEventListener('touchmove', e => {
+      if (!draggingScale) return;
+      const rect = canvas.getBoundingClientRect();
+      const t = e.touches[0];
+      const y = t.clientY - rect.top;
+      const { T, B } = getPlotRect();
+      scaleY = Math.max(T + 12, Math.min(B, y + scaleGrabOffset));
+      draw();
+      e.preventDefault();
+    }, { passive: false });
+
+    canvas.addEventListener('touchend', () => { draggingScale = false; }, { passive: true });
+    canvas.addEventListener('touchcancel', () => { draggingScale = false; }, { passive: true });
+
     const MIN_X_SPAN = 5;      // nm
     const MIN_Y_SPAN = 0.02;   // display units after transform
 
@@ -692,23 +866,21 @@
       draw();
     }, { passive: false });
 
-
-
     yScaleSel.addEventListener('change', () => {
-      if (yScaleSel.value === 'abs') updateAbsYRangeForGain(parseFloat(gain.value) || 1);
-      else applySelection();  // recompute auto range
+      if (yScaleSel.value === 'abs') updateAbsYRange();
+      else applySelection();
       draw();
     });
+
     gain.addEventListener('input', () => {
       const g = parseFloat(gain.value) || 1;
       gainOut.textContent = '×' + g.toFixed(2);
-      if (yScaleSel.value === 'abs') updateAbsYRangeForGain(g);
       draw();
     });
 
     function setStatus(msg) { statusEl.textContent = msg; }
 
-    objSel.addEventListener('change', () => { gain.value = 1; gainOut.textContent = "x1.00"; current = parseInt(objSel.value, 10); applySelection(); });
+    objSel.addEventListener('change', () => { gain.value = 0.5; gainOut.textContent = "×0.50"; current = parseInt(objSel.value, 10); applySelection(); });
     modeSel.addEventListener('change', () => { drawLegend(); draw(); });
     applyZBtn.addEventListener('click', () => { drawLegend(); draw(); });
     document.getElementById('open').addEventListener('click', () => fileIn.click());
