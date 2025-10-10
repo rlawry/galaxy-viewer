@@ -51,6 +51,7 @@
       width: 100vw;
       height: calc(100vh - 150px);
       background: #0a0a0a;
+      touch-action: none;
     }
 
     .pill {
@@ -247,7 +248,7 @@
     const openBtn = document.getElementById('open');
     const fileIn = document.getElementById('file');
     const legend = document.getElementById('legend');
-    let hoverNm = null;  // current hover wavelength in nm (or null)
+    let hoverNm = null, hoverYpx = null;  // current hover wavelength in nm (or null)
 
     // ---- wavelength scale (draggable) ----
     let scaleY = null;           // pixel Y of the scale baseline; null ⇒ default at B
@@ -545,6 +546,23 @@
       draw();
     }
 
+    function updateHover(e) {
+      const rect = canvas.getBoundingClientRect();
+      const pt = (e.touches && e.touches.length) ? e.touches[0] : e;
+      const x = pt.clientX - rect.left;
+      const y = pt.clientY - rect.top;
+
+      const { L, R, T, B } = getPlotRect();
+      hoverYpx = Math.max(T, Math.min(B, y));   // remember pointer Y (clamped)
+
+      if (x >= L && x <= R && y >= T && y <= B) {
+        const frac = (x - L) / Math.max(1, (R - L));
+        hoverNm = view.xlo + frac * (view.xhi - view.xlo);
+      } else {
+        hoverNm = null; hoverYpx = null;
+      }
+    }
+
 
     // Baseline absolute transform (gain-independent)
     function transformFluxAbsBase(f) {
@@ -642,10 +660,6 @@
       ctx.lineWidth = 1; ctx.strokeStyle = '#333';
       ctx.beginPath(); ctx.moveTo(L, T); ctx.lineTo(L, B); ctx.lineTo(R, B); ctx.stroke();
 
-      // axes
-      ctx.lineWidth = 1; ctx.strokeStyle = '#333';
-      ctx.beginPath(); ctx.moveTo(L, T); ctx.lineTo(L, B); ctx.lineTo(R, B); ctx.stroke();
-
       // wavelength scale (draggable baseline)
       drawWavelengthScale(L, R, T, B, W);
 
@@ -709,17 +723,21 @@
         ctx.stroke();
 
         // wavelength label (outlined for readability), same color as the line
+
+
+        // place label a bit above pointer, clamped inside plot
+        const ly = Math.max(T + 12, Math.min(B - 12, (hoverYpx ?? B) - 10));
+
+        // label above pointer
         const label = `${hoverNm.toFixed(1)} nm`;
         ctx.font = 'bold 14px system-ui, sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'bottom';
-        ctx.shadowColor = 'transparent';
         ctx.lineWidth = 3;
         ctx.strokeStyle = 'rgba(0,0,0,0.65)';
-        ctx.strokeText(label, px, B - 2);
+        ctx.strokeText(label, px, ly);
         ctx.fillStyle = col;
-        ctx.fillText(label, px, B - 2);
-
+        ctx.fillText(label, px, ly);
         ctx.restore();
       }
     }
@@ -770,14 +788,15 @@
 
     window.addEventListener('mouseup', () => { draggingPlot = false; draggingScale = false; });
 
-    canvas.addEventListener('mousemove', e => { updateHover(e); }); // hover only
-    canvas.addEventListener('mouseleave', () => { hoverNm = null; draw(); });
+    canvas.addEventListener('mousemove', e => { updateHover(e); draw(); }); // hover only
+    canvas.addEventListener('mouseleave', () => { hoverNm = null; hoverYpx = null; draw(); });
 
     // TOUCH (scale dragging only; won’t interfere with plot handlers)
     canvas.addEventListener('touchstart', e => {
       const rect = canvas.getBoundingClientRect();
       const t = e.touches[0];
       const x = t.clientX - rect.left, y = t.clientY - rect.top;
+      if (!draggingScale) { updateHover(e); draw(); }
       if (hitScaleAt(x, y)) {
         draggingScale = true;
         const { B } = getPlotRect();
@@ -787,7 +806,7 @@
     }, { passive: false });
 
     canvas.addEventListener('touchmove', e => {
-      if (!draggingScale) return;
+      if (!draggingScale) { updateHover(e); draw(); }
       const rect = canvas.getBoundingClientRect();
       const t = e.touches[0];
       const y = t.clientY - rect.top;
@@ -797,8 +816,8 @@
       e.preventDefault();
     }, { passive: false });
 
-    canvas.addEventListener('touchend', () => { draggingScale = false; }, { passive: true });
-    canvas.addEventListener('touchcancel', () => { draggingScale = false; }, { passive: true });
+    canvas.addEventListener('touchend', () => { draggingScale = false; hoverNm = null; hoverYpx = null; draw(); }, { passive: true });
+    canvas.addEventListener('touchcancel', () => { draggingScale = false; hoverNm = null; hoverYpx = null; draw(); }, { passive: true });
 
     const MIN_X_SPAN = 5;      // nm
     const MIN_Y_SPAN = 0.02;   // display units after transform
@@ -813,22 +832,6 @@
         lo = mid - 0.5 * minSpan; hi = mid + 0.5 * minSpan;
       }
       return [lo, hi];
-    }
-
-    function updateHover(e) {
-      const rect = canvas.getBoundingClientRect();
-      const w = canvas.clientWidth, h = canvas.clientHeight;
-      const L = 40, R = w - 10, T = 10, B = h - 30;
-
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
-
-      if (x >= L && x <= R && y >= T && y <= B) {
-        const frac = (x - L) / Math.max(1, (R - L));
-        hoverNm = view.xlo + frac * (view.xhi - view.xlo);
-      } else {
-        hoverNm = null;
-      }
     }
 
     function wheelDir(e) {
