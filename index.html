@@ -8,6 +8,12 @@
   <style>
     :root {
       color-scheme: dark light;
+      --sideW: 320px;
+      --slideMs: 240ms;
+    }
+
+    * {
+      box-sizing: border-box;
     }
 
     body {
@@ -17,66 +23,119 @@
       color: #e5e5e5;
     }
 
-    header,
-    footer {
-      padding: 8px 12px;
+    /* Top toolbar */
+    header.toolbar {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px;
       background: #111;
       border-bottom: 1px solid #222;
     }
 
-    footer {
-      border-top: 1px solid #222;
-      border-bottom: none;
-    }
-
-    .row {
+    header .group {
       display: flex;
-      gap: 12px;
-      flex-wrap: wrap;
+      gap: 10px;
       align-items: center;
+      flex-wrap: wrap;
     }
 
-    button,
+    header .title {
+      font: 700 16px/1 system-ui, sans-serif;
+      margin-right: 6px;
+      color: #ddd;
+    }
+
     select,
-    input {
+    input,
+    button {
       background: #181818;
       color: #ddd;
       border: 1px solid #333;
-      border-radius: 6px;
-      padding: 6px 8px;
+      border-radius: 8px;
+      padding: 6px 10px;
+    }
+
+    select.lg,
+    button.lg {
+      padding: 8px 12px;
+      font-weight: 600;
+    }
+
+    #status {
+      margin-left: auto;
+    }
+
+    /* Layout */
+    main.layout {
+      display: grid;
+      gap: 12px;
+      padding: 12px;
+      grid-template-columns: 1fr var(--sideW);
+      /* side width comes from the track */
+      transition: grid-template-columns var(--slideMs) ease;
+    }
+
+    body.panel-collapsed main.layout {
+      grid-template-columns: 1fr 0;
+      /* collapse the track */
+    }
+
+
+    #plotArea {
+      position: relative;
+      min-height: 60vh;
     }
 
     #canvas {
       display: block;
-      width: 100vw;
-      height: calc(100vh - 150px);
+      width: 100%;
+      height: calc(100vh - 220px);
       background: #0a0a0a;
       touch-action: none;
+      border: 1px solid #222;
+      border-radius: 10px;
     }
 
-    .pill {
-      padding: 2px 8px;
-      border-radius: 999px;
+    /* Readable, mobile-friendly legend bar over the plot */
+    #legendBar {
+      position: absolute;
+      left: 50%;
+      top: 8px;
+      transform: translateX(-50%);
+      max-width: min(900px, 92%);
+      padding: 6px 10px;
+      background: rgba(0, 0, 0, .55);
+      backdrop-filter: blur(4px);
       border: 1px solid #333;
-      background: #151515;
+      border-radius: 999px;
+      overflow: auto;
+      white-space: nowrap;
     }
 
     #legend {
-      font-size: 12px;
+      font-size: 13px;
+      color: #e5e5e5;
     }
 
-    /* overlay */
+    /* Right panel (image + simple controls) */
+    aside#sidePanel {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
 
     #cutoutWrap {
-      position: fixed;
-      right: 12px;
-      bottom: 12px;
-      width: 280px;
-      height: 280px;
+      position: sticky;
+      top: 12px;
+      width: 100%;
+      height: 260px;
       border: 1px solid #333;
       border-radius: 10px;
       background: #000;
-      z-index: 20;
       overflow: hidden;
     }
 
@@ -84,8 +143,7 @@
       width: 100%;
       height: 100%;
       object-fit: contain;
-
-      opacity: .9;
+      opacity: .95;
       pointer-events: none;
     }
 
@@ -98,44 +156,69 @@
       font: 600 12px/1.2 system-ui, sans-serif;
       color: #eee;
       text-align: right;
-      /* bottom-right, per your spec */
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      text-shadow: 0 1px 2px rgba(0, 0, 0, .7);
       background: linear-gradient(to top, rgba(0, 0, 0, .55), rgba(0, 0, 0, 0));
-      pointer-events: none;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, .7);
     }
 
-    #mapOverlay {
-      position: fixed;
-      inset: 0;
-      z-index: 1000;
-      background: rgba(0, 0, 0, .88);
+    .card {
+      border: 1px solid #333;
+      border-radius: 12px;
+      background: #141414;
+      padding: 10px;
     }
 
-    #map3d {
-      position: absolute;
-      inset: 0;
-      width: 100%;
-      height: 100%;
-      display: block;
-      cursor: grab;
+    .card h3 {
+      margin: 0 0 8px;
+      font: 600 13px/1 system-ui, sans-serif;
+      color: #bbb;
     }
 
-    #map3d:active {
-      cursor: grabbing;
+    /* “More” menu for teacher/admin items */
+    details.more {
+      margin-left: auto;
     }
 
-    #mapClose {
-      position: absolute;
-      top: 12px;
-      right: 12px;
-      background: #181818;
-      color: #ddd;
+    details.more summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 6px 10px;
       border: 1px solid #333;
       border-radius: 8px;
-      padding: 6px 10px;
+      background: #181818;
+    }
+
+    details.more[open] summary {
+      border-bottom-left-radius: 0;
+      border-bottom-right-radius: 0;
+    }
+
+    .moreMenu {
+      border: 1px solid #333;
+      border-top: none;
+      background: #141414;
+      padding: 10px;
+      border-radius: 0 0 8px 8px;
+      display: grid;
+      gap: 8px;
+      grid-template-columns: 1fr auto;
+    }
+
+    .moreMenu label {
+      font-size: 12px;
+      color: #aaa;
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .help {
+      font-size: 12px;
+      color: #888;
+    }
+
+    /* Footer gone — legend moved up. Keep footer shell if you need attribution later */
+    footer {
+      display: none;
     }
 
     #mapOverlay {
@@ -153,42 +236,7 @@
       height: 100%;
       display: block;
       cursor: grab;
-      z-index: 0;
       touch-action: none;
-      /* disable browser panning/zoom so we handle it */
-    }
-
-    #map3d:active {
-      cursor: grabbing;
-    }
-
-    #mapControls {
-      position: absolute;
-      top: 12px;
-      left: 12px;
-      z-index: 2;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 8px 12px;
-      border: 1px solid #333;
-      border-radius: 10px;
-      color: #ddd;
-      background: rgba(20, 20, 20, .85);
-      backdrop-filter: blur(4px);
-    }
-
-    #mapControls label {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font: 500 13px system-ui, sans-serif;
-    }
-
-    #mapControls input[type="checkbox"] {
-      width: 18px;
-      height: 18px;
-      accent-color: #5aa7ff;
     }
 
     #mapClose {
@@ -197,45 +245,142 @@
       right: 12px;
       z-index: 2;
     }
+
+    #mapControls {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      z-index: 2;
+    }
+
+    #map3d:active {
+      cursor: grabbing;
+    }
+
+    aside#sidePanel {
+      min-width: 0;
+      /* allow shrinking to 0 */
+      overflow: hidden;
+      /* clip while sliding */
+      border-left: 1px solid #222;
+      border-radius: 10px;
+    }
+
+    body.panel-collapsed aside#sidePanel {
+      width: 0;
+    }
+
+    /* hamburger button style */
+    .icon-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 36px;
+      height: 36px;
+      cursor: pointer;
+      border: 1px solid #333;
+      border-radius: 8px;
+      background: #181818;
+      color: #ddd;
+    }
+
+    .icon-btn:active {
+      transform: translateY(1px);
+    }
+
+    /* Responsive */
+    @media (max-width: 900px) {
+      main.layout {
+        grid-template-columns: 1fr;
+      }
+
+      aside#sidePanel {
+        max-height: 520px;
+        transition: max-height var(--slideMs) ease;
+      }
+
+      body.panel-collapsed aside#sidePanel {
+        max-height: 0;
+      }
+    }
   </style>
 
-</head>
+  <header class="toolbar">
+    <div class="title">Galaxy Spectra Viewer</div>
 
-<body>
-  <header>
-    <div class='row'>
-      <label>Object</label><select id='obj'></select>
-      <label>Mode</label>
-      <select id='mode'>
-        <option value='observed'>Observed</option>
-        <option value='rest'>Rest-frame (divide by 1+z)</option>
+    <div class="group">
+      <label for="obj" style="font-size:12px;color:#aaa">Galaxy</label>
+      <select id="obj" class="lg"></select>
+    </div>
+
+    <div class="group">
+      <label for="mode" style="font-size:12px;color:#aaa">Frame</label>
+      <select id="mode">
+        <option value="observed">Observed</option>
+        <option value="rest">Rest-frame</option>
       </select>
-      <label>z</label><input id='z' type='number' step='0.0001' value='0' style='width:110px'>
-      <button id='applyZ'>Apply z</button>
-      <button id='open'>Open JSON…</button>
-      <span class='pill' id='status'>No file loaded</span>
     </div>
-    <label>Scaling</label>
-    <select id="yscale">
-      <option value="auto">Auto</option>
-      <option value="abs" selected>Absolute</option>
-    </select>
-    <label>Flux scale</label>
-    <input id="gain" type="range" min="0.01" max="2" step="0.01" value="0.50">
-    <output id="gainOut" class="pill">×0.50</output>
-    <label><input id="showLines" type="checkbox"> Show element lines</label>
-    <button id="showMap">Show Map</button>
-  </header>
-  <canvas id='canvas'></canvas>
-  <style>
 
-  </style>
-  <footer>
-    <div class='row'>
-      <div id='legend'></div>
-      <div style='margin-left:auto'><span class='pill'>Vertical lines: key rest wavelengths</span></div>
+    <div class="group">
+      <label for="yscale" style="font-size:12px;color:#aaa">Y-scale</label>
+      <select id="yscale">
+        <option value="auto">Auto</option>
+        <option value="abs" selected>Absolute</option>
+      </select>
     </div>
-  </footer>
+
+    <div class="group">
+      <label for="gain" style="font-size:12px;color:#aaa">Flux</label>
+      <input id="gain" type="range" min="0.01" max="2" step="0.01" value="0.50">
+      <output id="gainOut" class="pill">×0.50</output>
+    </div>
+
+    <label class="group" style="gap:6px;"><input id="showLines" type="checkbox"> Show lines</label>
+
+    <button id="showMap">Sky map</button>
+
+    <details class="more">
+      <summary>More</summary>
+      <div class="moreMenu">
+        <label>z <input id="z" type="number" step="0.0001" value="0" style="width:110px"></label>
+        <button id="applyZ">Apply z</button>
+        <span class="help">Teacher tools:</span>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <button id="open">Load JSON…</button>
+          <span class="pill" id="status">No file loaded</span>
+        </div>
+      </div>
+    </details>
+    <button id="togglePanel" class="icon-btn" aria-label="Toggle side panel" aria-expanded="true" aria-pressed="false"
+      title="Toggle side panel">☰</button>
+  </header>
+
+  <main class="layout">
+    <section id="plotArea">
+      <div id="legendBar">
+        <div id="legend"></div>
+      </div>
+      <canvas id="canvas"></canvas>
+    </section>
+
+    <aside id="sidePanel">
+      <div id="cutoutWrap">
+        <img id="cutout" alt="Galaxy cutout">
+        <div id="cutoutCaption" aria-live="polite"></div>
+      </div>
+
+      <div class="card">
+        <h3>Viewing tips</h3>
+        <ul style="margin:0 0 0 16px; padding:0; color:#9aa;">
+          <li>Drag the wavelength scale to move it closer to the plot.</li>
+          <li>Scroll (or two-finger swipe) to pan vertically.</li>
+          <li>Tap/hover to read wavelength; vertical color line matches spectrum color.</li>
+        </ul>
+      </div>
+    </aside>
+  </main>
+
+  <footer></footer>
   <input type='file' id='file' accept='.json' style='display:none'>
   <script>
     const canvas = document.getElementById('canvas');
@@ -254,7 +399,9 @@
     let scaleY = null;           // pixel Y of the scale baseline; null ⇒ default at B
     let draggingScale = false;
     let scaleGrabOffset = 0;     // mouse Y offset when grabbing the scale
-
+    let scaleHover = false;   // mouse is over the draggable scale?
+    let twoTouchActive = false;
+    let twoTouchPrevY = null;
 
     const REST_LINES = [
       //["[O II]", 3727.0],
@@ -370,6 +517,22 @@
       return x >= L && x <= R && Math.abs(y - y0) <= 12;
     }
 
+    function updateScaleHover(e) {
+      const rect = canvas.getBoundingClientRect();
+      const pt = e.touches?.[0] ?? e;
+      const x = pt.clientX - rect.left;
+      const y = pt.clientY - rect.top;
+
+      const was = scaleHover;
+      scaleHover = hitScaleAt(x, y);
+
+      // cursor: hand over scale, grabbing while dragging
+      canvas.style.cursor = draggingScale ? 'grabbing' : (scaleHover ? 'grab' : 'auto');
+
+      if (scaleHover !== was) draw(); // re-draw to toggle glow
+    }
+
+
     function drawWavelengthScale(L, R, T, B, W) {
       // choose baseline (default at bottom axis B), and clamp within plot
       const baseY = scaleY == null ? B : Math.max(T + 12, Math.min(B, scaleY));
@@ -397,12 +560,20 @@
       const nm2x = nm => L + (nm - view.xlo) / spanNm * W;
 
       // baseline
-      ctx.strokeStyle = '#444';
-      ctx.lineWidth = 1;
+      // baseline (with hover/drag glow)
+      const hovered = scaleHover || draggingScale;
+      ctx.save();
+      ctx.lineWidth = hovered ? 1.5 : 1;
+      ctx.strokeStyle = hovered ? '#78aaff' : '#444';
+      if (hovered) {
+        ctx.shadowColor = 'rgba(120,170,255,0.9)';
+        ctx.shadowBlur = 8;
+      }
       ctx.beginPath();
       ctx.moveTo(L, baseY);
       ctx.lineTo(R, baseY);
       ctx.stroke();
+      ctx.restore();
 
       // tertiary ticks (smallest)
       if (tertiary) {
@@ -755,10 +926,10 @@
         draggingScale = true;
         const { B } = getPlotRect();
         scaleGrabOffset = (scaleY == null ? B : scaleY) - y;
+        canvas.style.cursor = 'grabbing';   // <—
         e.preventDefault(); e.stopPropagation();
         return;
       }
-
       // start plot drag
       draggingPlot = true;
       lastX = e.clientX; lastY = e.clientY;
@@ -786,38 +957,84 @@
       }
     });
 
-    window.addEventListener('mouseup', () => { draggingPlot = false; draggingScale = false; });
+    window.addEventListener('mouseup', () => {
+      draggingPlot = false; draggingScale = false; canvas.style.cursor = scaleHover ? 'grab' : 'auto';
+    });
 
-    canvas.addEventListener('mousemove', e => { updateHover(e); draw(); }); // hover only
-    canvas.addEventListener('mouseleave', () => { hoverNm = null; hoverYpx = null; draw(); });
+    canvas.addEventListener('mousemove', e => { updateScaleHover(e); updateHover(e); draw(); }); // hover only
+    canvas.addEventListener('mouseleave', () => {
+      hoverNm = null;
+      hoverYpx = null;
+      scaleHover = false;
+      if (!draggingScale) canvas.style.cursor = 'auto'; draw();
+    });
 
-    // TOUCH (scale dragging only; won’t interfere with plot handlers)
+    // TOUCH START
     canvas.addEventListener('touchstart', e => {
-      const rect = canvas.getBoundingClientRect();
-      const t = e.touches[0];
-      const x = t.clientX - rect.left, y = t.clientY - rect.top;
-      if (!draggingScale) { updateHover(e); draw(); }
-      if (hitScaleAt(x, y)) {
-        draggingScale = true;
-        const { B } = getPlotRect();
-        scaleGrabOffset = (scaleY == null ? B : scaleY) - y;
-        e.preventDefault(); e.stopPropagation();
+      if (e.touches.length === 2) {
+        // start two-finger Y pan
+        twoTouchActive = true;
+        draggingScale = false;                      // cancel any scale drag
+        twoTouchPrevY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        e.preventDefault();
+        return;
+      }
+      if (e.touches.length === 1) {
+        const rect = canvas.getBoundingClientRect();
+        const t = e.touches[0];
+        const x = t.clientX - rect.left, y = t.clientY - rect.top;
+        updateHover(e);
+        if (hitScaleAt(x, y)) {
+          draggingScale = true;
+          const { B } = getPlotRect();
+          scaleGrabOffset = (scaleY == null ? B : scaleY) - y;
+          e.preventDefault(); e.stopPropagation();
+        }
       }
     }, { passive: false });
 
+    // TOUCH MOVE
     canvas.addEventListener('touchmove', e => {
-      if (!draggingScale) { updateHover(e); draw(); }
-      const rect = canvas.getBoundingClientRect();
-      const t = e.touches[0];
-      const y = t.clientY - rect.top;
-      const { T, B } = getPlotRect();
-      scaleY = Math.max(T + 12, Math.min(B, y + scaleGrabOffset));
-      draw();
-      e.preventDefault();
+      if (twoTouchActive && e.touches.length === 2) {
+        const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        const dy = cy - twoTouchPrevY;
+        twoTouchPrevY = cy;
+
+        const span = (view.yhi - view.ylo);
+        const frac = dy / canvas.clientHeight;
+        view.ylo += frac * span;
+        view.yhi += frac * span;
+        draw();
+        e.preventDefault();
+        return;
+      }
+
+      if (draggingScale && e.touches.length === 1) {
+        const rect = canvas.getBoundingClientRect();
+        const y = e.touches[0].clientY - rect.top;
+        const { T, B } = getPlotRect();
+        scaleY = Math.max(T + 12, Math.min(B, y + scaleGrabOffset));
+        draw();
+        e.preventDefault();
+        return;
+      }
+
+      if (e.touches.length === 1) {  // hover only
+        updateHover(e);
+        draw();
+        e.preventDefault();
+      }
     }, { passive: false });
 
-    canvas.addEventListener('touchend', () => { draggingScale = false; hoverNm = null; hoverYpx = null; draw(); }, { passive: true });
-    canvas.addEventListener('touchcancel', () => { draggingScale = false; hoverNm = null; hoverYpx = null; draw(); }, { passive: true });
+    // TOUCH END/CANCEL
+    canvas.addEventListener('touchend', e => {
+      if (e.touches.length < 2) { twoTouchActive = false; twoTouchPrevY = null; }
+      if (e.touches.length === 0) { draggingScale = false; }
+    }, { passive: true });
+
+    canvas.addEventListener('touchcancel', () => {
+      twoTouchActive = false; twoTouchPrevY = null; draggingScale = false;
+    }, { passive: true });
 
     const MIN_X_SPAN = 5;      // nm
     const MIN_Y_SPAN = 0.02;   // display units after transform
@@ -834,40 +1051,16 @@
       return [lo, hi];
     }
 
-    function wheelDir(e) {
-      // +1 = scroll down, -1 = scroll up
-      if (e.deltaY !== 0) return e.deltaY > 0 ? +1 : -1;
-      if ('wheelDelta' in e && e.wheelDelta !== 0) return e.wheelDelta > 0 ? -1 : +1; // legacy inverted
-      if ('detail' in e && e.detail !== 0) return e.detail > 0 ? +1 : -1;            // very old FF
-      return 0;
-    }
-
+    // Wheel: always pan Y (slowly)
     canvas.addEventListener('wheel', e => {
       e.preventDefault();
-
-      const w = canvas.clientWidth, h = canvas.clientHeight;
-      const L = 40, R = w - 10, T = 10, B = h - 30, W = R - L, H = B - T;
-
-      const mx = Math.min(1, Math.max(0, (e.clientX - canvas.getBoundingClientRect().left - L) / Math.max(1, W)));
-      const my = Math.min(1, Math.max(0, (e.clientY - canvas.getBoundingClientRect().top - T) / Math.max(1, H)));
-
-      const xmid = view.xlo + mx * (view.xhi - view.xlo);
-      const ymid = view.yhi - my * (view.yhi - view.ylo);
-
-      const dirY = wheelDir(e);              // -1 up, +1 down
-      const dirX = Math.sign(e.deltaX || 0); // -1 left, +1 right
-      const ZSTEP = 1.12;
-      const factor = dirY > 0 ? ZSTEP : (dirY < 0 ? 1 / ZSTEP : 1);
-      const panStep = 0.002;
-
-      if (e.shiftKey) {
-        if (yScaleSel.value !== 'abs') {
-          const dyPan = dirY * panStep * (view.yhi - view.ylo);
-          view.ylo += dyPan; view.yhi += dyPan;
-        }
-      }
+      const dir = Math.sign(e.deltaY);                  // down=+1, up=-1
+      const step = 0.03 * (view.yhi - view.ylo);        // 3% per tick
+      view.ylo += dir * step;
+      view.yhi += dir * step;
       draw();
     }, { passive: false });
+
 
     yScaleSel.addEventListener('change', () => {
       if (yScaleSel.value === 'abs') updateAbsYRange();
@@ -1211,11 +1404,37 @@
       }, { passive: false });
     });
 
+    const sidePanel = document.getElementById('sidePanel');
+    const togglePanelBtn = document.getElementById('togglePanel');
+
+    const layout = document.querySelector('main.layout');
+    function setPanelCollapsed(collapsed) {
+      document.body.classList.toggle('panel-collapsed', collapsed);
+      togglePanelBtn.setAttribute('aria-expanded', String(!collapsed));
+      togglePanelBtn.setAttribute('aria-pressed', String(collapsed));
+      const onEnd = (e) => {
+        if (e.propertyName === 'grid-template-columns' || e.propertyName === 'max-height') {
+          layout.removeEventListener('transitionend', onEnd);
+          resize(); draw();
+        }
+      };
+      layout.addEventListener('transitionend', onEnd);
+    }
+    togglePanelBtn.addEventListener('click', () => {
+      const collapsed = !document.body.classList.contains('panel-collapsed');
+      setPanelCollapsed(collapsed);
+    });
+
+    // optional: remember state
+    try {
+      const saved = localStorage.getItem('panelCollapsed') === '1';
+      if (saved) setPanelCollapsed(true);
+      new MutationObserver(() => {
+        const c = document.body.classList.contains('panel-collapsed');
+        localStorage.setItem('panelCollapsed', c ? '1' : '0');
+      }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+    } catch { }
   </script>
-  <div id="cutoutWrap">
-    <img id="cutout" alt="cutout">
-    <div id="cutoutCaption" aria-live="polite"></div>
-  </div>
   <div id="mapOverlay" style="display:none">
     <canvas id="map3d"></canvas>
     <div id="mapControls">
@@ -1223,6 +1442,6 @@
     </div>
     <button id="mapClose" aria-label="Close Map">✕</button>
   </div>
-</body>
+  </body>
 
 </html>
