@@ -16,6 +16,11 @@
       box-sizing: border-box;
     }
 
+    html,
+    body {
+      overscroll-behavior: none;
+    }
+
     body {
       margin: 0;
       font-family: system-ui, sans-serif;
@@ -342,7 +347,7 @@
     <details class="more">
       <summary>More</summary>
       <div class="moreMenu">
-        <label>z <input id="z" type="number" step="0.0001" value="0" style="width:110px"></label>
+        <label>z <input id="z" type="number" step="any" inputmode="decimal" value="0" style="width:130px"></label>
         <button id="applyZ">Apply z</button>
         <span class="help">Teacher tools:</span>
         <div style="display:flex; gap:8px; align-items:center;">
@@ -402,6 +407,15 @@
     let scaleHover = false;   // mouse is over the draggable scale?
     let twoTouchActive = false;
     let twoTouchPrevY = null;
+    let pinchPrevDist = 0;
+    let pinchAnchorNm = null;
+    let currentZ = 0;
+
+    // --- X-pan inertia ---
+    const XIN = { vx: 0, raf: 0, last: 0 };
+    const X_FRICTION = 0.92;          // per 16.7 ms
+    const X_MIN_V = 1e-4;             // nm/ms threshold
+    const X_GAIN = 0.06;              // maps wheel deltaX to nm/ms
 
     const REST_LINES = [
       //["[O II]", 3727.0],
@@ -431,6 +445,99 @@
     let GLOBAL = { med: 0, mad: 1, qlo: 0, qhi: 0 };
     let ABS_BASE_R = 1;               // half-height in transformed units
     const ABS_PAD_FRAC = 0.20;
+
+    // --- Reset overlay button ---
+    let resetBtnVisible = false;
+    let resetBtnRect = null; // {x,y,w,h} in CSS px
+
+    function showResetButton() { resetBtnVisible = true; }
+    function hideResetButton() { resetBtnVisible = false; resetBtnRect = null; }
+
+    function stopXInertia() {
+      if (XIN.raf) cancelAnimationFrame(XIN.raf);
+      XIN.vx = 0; XIN.raf = 0; XIN.last = 0;
+    }
+    function stepXInertia(t) {
+      if (!XIN.raf) return;
+      const now = t || performance.now();
+      const dt = Math.max(0, Math.min(32, now - (XIN.last || now)));
+      XIN.last = now;
+
+      // move
+      const dxNm = XIN.vx * dt;
+      view.xlo += dxNm; view.xhi += dxNm;
+
+      // hard clamp and kill velocity at edges
+      if (view.xlo < VIS_MIN_NM) {
+        const s = VIS_MIN_NM - view.xlo;
+        view.xlo += s; view.xhi += s;
+        XIN.vx = 0;
+      }
+      if (view.xhi > VIS_MAX_NM) {
+        const s = view.xhi - VIS_MAX_NM;
+        view.xlo -= s; view.xhi -= s;
+        XIN.vx = 0;
+      }
+
+      // decay
+      const decay = Math.pow(X_FRICTION, dt / 16.7);
+      XIN.vx *= decay;
+
+      draw();
+      if (Math.abs(XIN.vx) < X_MIN_V) { stopXInertia(); return; }
+      XIN.raf = requestAnimationFrame(stepXInertia);
+    }
+
+    function startXInertia(vx0) {
+      XIN.vx = vx0;
+      if (!XIN.raf) {
+        XIN.last = performance.now();
+        XIN.raf = requestAnimationFrame(stepXInertia);
+      }
+    }
+
+    // --- vertical pan bounds/slow ---
+    const Y_MARGIN = 0.02;          // padding in display units
+    const Y_FINGER_SLOW = 0.25;     // touch two-finger
+    const Y_MOUSE_SLOW = 0.25;     // mouse drag
+    const Y_WHEEL_SLOW = 0.12;     // wheel
+
+    function currentContentBounds() {
+      const d = data[current]; if (!d) return { ymin: -1, ymax: 1 };
+      const g = parseFloat(gain.value) || 1;
+      const ft = (yScaleSel.value === 'abs')
+        ? transformFluxAbsBase(d.flux).map(v => v * g)
+        : transformFluxAuto(d.flux);
+      let ymin = Infinity, ymax = -Infinity;
+      for (const v of ft) { if (v < ymin) ymin = v; if (v > ymax) ymax = v; }
+      return {
+        ymin: Number.isFinite(ymin) ? ymin : -1,
+        ymax: Number.isFinite(ymax) ? ymax : 1
+      };
+    }
+
+    function clampYPan(rawShift) {
+      const { ymin, ymax } = currentContentBounds();
+      const smin = (ymax - Y_MARGIN) - view.yhi; // top cannot go below max
+      const smax = (ymin + Y_MARGIN) - view.ylo; // bottom cannot go above min
+      return Math.max(smin, Math.min(smax, rawShift));
+    }
+
+
+    function resetDisplay() {
+      stopXInertia();
+      // X: full visible band
+      view.xlo = VIS_MIN_NM; view.xhi = VIS_MAX_NM;
+      // Y: mode-dependent
+      if (yScaleSel.value === 'abs') updateAbsYRange();
+      else {
+        const d = data[current]; const ft = transformFluxAuto(d?.flux || []);
+        setYFromTransformed(ft);
+      }
+      scaleY = null; // scale baseline back to axis
+      hideResetButton();
+      draw();
+    }
 
     function computeGlobalStats() {
       const all = data.flatMap(d => d.flux || []);
@@ -492,19 +599,11 @@
       return f.map(v => Math.asinh((v - m) / s));
     }
 
-    function transformFluxAbsBase(f) {
-      const s0 = 3 * GLOBAL.mad;
-      return f.map(v => Math.asinh((v - GLOBAL.med) / s0)); // centered at 0
-    }
-
-
     function resize() {
       const dpr = window.devicePixelRatio || 1; canvas.width = Math.floor(canvas.clientWidth * dpr);
       canvas.height = Math.floor(canvas.clientHeight * dpr); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); draw();
     }
     window.addEventListener('resize', resize);
-
-    function setStatus(msg) { statusEl.textContent = msg; }
 
     function getPlotRect() {
       const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -532,108 +631,158 @@
       if (scaleHover !== was) draw(); // re-draw to toggle glow
     }
 
+    // Helper: where can labels start (just below legend if it overlaps canvas)
+    function legendLabelTop(T = 10) {
+      const bar = document.getElementById('legendBar');
+      if (!bar) return T;
+      const barRect = bar.getBoundingClientRect();
+      const canRect = canvas.getBoundingClientRect();
+      // If no overlap, keep default top
+      const overlaps =
+        !(barRect.bottom < canRect.top ||
+          barRect.top > canRect.bottom ||
+          barRect.right < canRect.left ||
+          barRect.left > canRect.right);
+      if (!overlaps) return T;
+      const gap = 6; // px padding under the legend
+      return Math.max(T, Math.round(barRect.bottom - canRect.top + gap));
+    }
+
+    function getScaleTiers(pxPerNm) {
+      // thresholds tuned for readability on HiDPI and standard screens
+      if (pxPerNm >= 15) return { major: 2, minor: 1, tert: 0.1 }; // case 4
+      if (pxPerNm >= 5) return { major: 5, minor: 1, tert: 0.5 }; // case 3
+      if (pxPerNm >= 2) return { major: 10, minor: 2, tert: 1 }; // case 2
+      return { major: 10, minor: 5, tert: 1 }; // case 1 (zoomed out)
+    }
 
     function drawWavelengthScale(L, R, T, B, W) {
-      // choose baseline (default at bottom axis B), and clamp within plot
+      // baseline
       const baseY = scaleY == null ? B : Math.max(T + 12, Math.min(B, scaleY));
       scaleY = baseY;
 
       const spanNm = Math.max(1e-6, (view.xhi - view.xlo));
       const pxPerNm = W / spanNm;
-
-      // major = 10 nm (always)
-      const MAJOR = 10;
-
-      // minor: prefer 1 nm if roomy, else 2 nm, else 5 nm (fallback none if too tight)
-      const MIN_MINOR_PX = 10;
-      let minor = null;
-      if (pxPerNm * 1 >= MIN_MINOR_PX) minor = 1;
-      else if (pxPerNm * 2 >= MIN_MINOR_PX) minor = 2;
-      else if (pxPerNm * 5 >= MIN_MINOR_PX) minor = 5;
-
-      // tertiary: only if it adds value
-      const MIN_TERT_PX = 6;
-      let tertiary = null;
-      if (minor === 5 && pxPerNm * 1 >= MIN_TERT_PX) tertiary = 1;
-      else if (minor === 1 && pxPerNm * 0.5 >= MIN_TERT_PX) tertiary = 0.5;
+      const { major: MAJOR, minor: MINOR, tert: TERT } = getScaleTiers(pxPerNm);
+      const fine = !!TERT && TERT <= 0.1;     // 0.1 nm tier
+      const EPS = 1e-6;
 
       const nm2x = nm => L + (nm - view.xlo) / spanNm * W;
 
-      // baseline
-      // baseline (with hover/drag glow)
+      // baseline (brighter + hover glow)
       const hovered = scaleHover || draggingScale;
       ctx.save();
-      ctx.lineWidth = hovered ? 1.5 : 1;
-      ctx.strokeStyle = hovered ? '#78aaff' : '#444';
-      if (hovered) {
-        ctx.shadowColor = 'rgba(120,170,255,0.9)';
-        ctx.shadowBlur = 8;
-      }
-      ctx.beginPath();
-      ctx.moveTo(L, baseY);
-      ctx.lineTo(R, baseY);
-      ctx.stroke();
+      ctx.lineWidth = hovered ? 1.8 : 1.2;
+      ctx.strokeStyle = hovered ? '#9ecbff' : '#6a86a5';
+      if (hovered) { ctx.shadowColor = 'rgba(158,203,255,0.9)'; ctx.shadowBlur = 10; }
+      ctx.beginPath(); ctx.moveTo(L, baseY); ctx.lineTo(R, baseY); ctx.stroke();
       ctx.restore();
 
-      // tertiary ticks (smallest)
-      if (tertiary) {
-        ctx.strokeStyle = '#2a2a2a';
+      // subtle grid on majors (integers in fine mode)
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+      ctx.lineWidth = 1;
+      const gridStep = fine ? 1 : MAJOR;
+      let g0 = Math.ceil(view.xlo / gridStep) * gridStep;
+      for (let nm = g0; nm <= view.xhi + EPS; nm += gridStep) {
+        const x = nm2x(nm);
+        ctx.beginPath(); ctx.moveTo(x, baseY - 18); ctx.lineTo(x, baseY); ctx.stroke();
+      }
+      ctx.restore();
+
+      // third-tier ticks
+      if (TERT) {
+        ctx.strokeStyle = '#5f6670';
         ctx.lineWidth = 1;
-        let n0 = Math.ceil(view.xlo / tertiary) * tertiary;
-        for (let nm = n0; nm <= view.xhi; nm += tertiary) {
+        let n0 = Math.ceil(view.xlo / TERT) * TERT;
+        for (let nm = n0; nm <= view.xhi + EPS; nm += TERT) {
+          if (fine) { if (Math.abs(nm - Math.round(nm)) < 1e-6) continue; } // skip integers
+          else {
+            if (Math.abs(nm / MINOR - Math.round(nm / MINOR)) < 1e-6) continue;
+            if (Math.abs(nm / MAJOR - Math.round(nm / MAJOR)) < 1e-6) continue;
+          }
           const x = nm2x(nm);
-          if (x < L - 1 || x > R + 1) continue;
-          ctx.beginPath();
-          ctx.moveTo(x, baseY);
-          ctx.lineTo(x, baseY - 3);
-          ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(x, baseY); ctx.lineTo(x, baseY - 3); ctx.stroke();
         }
       }
 
-      // minor ticks
-      if (minor) {
-        ctx.strokeStyle = '#555';
+      // minor ticks (suppressed in fine mode)
+      if (!fine && MINOR) {
+        ctx.strokeStyle = '#556270';
         ctx.lineWidth = 1;
-        let n0 = Math.ceil(view.xlo / minor) * minor;
-        for (let nm = n0; nm <= view.xhi; nm += minor) {
-          if (MAJOR && (nm % MAJOR === 0)) continue; // major will draw on top
+        let n0 = Math.ceil(view.xlo / MINOR) * MINOR;
+        for (let nm = n0; nm <= view.xhi + EPS; nm += MINOR) {
+          if (Math.abs(nm / MAJOR - Math.round(nm / MAJOR)) < 1e-6) continue;
           const x = nm2x(nm);
-          if (x < L - 1 || x > R + 1) continue;
-          ctx.beginPath();
-          ctx.moveTo(x, baseY);
-          ctx.lineTo(x, baseY - 6);
-          ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(x, baseY); ctx.lineTo(x, baseY - 6); ctx.stroke();
         }
       }
 
-      // major ticks + labels (avoid label overlap if too tight)
-      ctx.strokeStyle = '#888';
-      ctx.lineWidth = 1.25;
-      ctx.fillStyle = '#bbb';
+      // major ticks
+      ctx.strokeStyle = '#a9b7c6';
+      ctx.lineWidth = 1.6;
+      if (fine) {
+        const i0 = Math.ceil(view.xlo), i1 = Math.floor(view.xhi);
+        for (let i = i0; i <= i1; i++) {
+          const x = nm2x(i);
+          ctx.beginPath(); ctx.moveTo(x, baseY); ctx.lineTo(x, baseY - 10); ctx.stroke();
+        }
+      } else {
+        let m0 = Math.ceil(view.xlo / MAJOR) * MAJOR;
+        for (let nm = m0; nm <= view.xhi + EPS; nm += MAJOR) {
+          const x = nm2x(nm);
+          ctx.beginPath(); ctx.moveTo(x, baseY); ctx.lineTo(x, baseY - 10); ctx.stroke();
+        }
+      }
+
+      // labels
+      ctx.fillStyle = '#d6e3ff';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'bottom';
-      ctx.font = '10px system-ui, sans-serif';
+      ctx.font = '11px system-ui, sans-serif';
 
-      let labelStep = MAJOR;            // try every 10 nm
-      const MIN_LABEL_PX = 34;          // if tighter, relax labels but keep 10-nm big ticks
-      if (pxPerNm * labelStep < MIN_LABEL_PX) labelStep = 20;
-      if (pxPerNm * labelStep < MIN_LABEL_PX) labelStep = 50;
-      if (pxPerNm * labelStep < MIN_LABEL_PX) labelStep = 100;
+      if (fine) {
+        // world-anchored integer labels with non-overlap
+        const i0 = Math.ceil(view.xlo), i1 = Math.floor(view.xhi);
+        if (i0 <= i1) {
+          // compute max label width in this window
+          let wmax = 0;
+          for (let i = i0; i <= i1; i++) wmax = Math.max(wmax, ctx.measureText(String(i)).width);
+          const PAD = 8;                                     // px padding between labels
+          const needPx = wmax + PAD;
+          const step = Math.max(1, Math.ceil(needPx / pxPerNm)); // nm between labels
 
-      let n0 = Math.ceil(view.xlo / MAJOR) * MAJOR;
-      for (let nm = n0; nm <= view.xhi; nm += MAJOR) {
-        const x = nm2x(nm);
-        if (x < L - 1 || x > R + 1) continue;
+          // anchor to 0 nm so parity is stable (no odd/even flip-flop)
+          const anchor = 0;
+          let start = Math.ceil((i0 - anchor) / step) * step + anchor;
 
-        // tick
-        ctx.beginPath();
-        ctx.moveTo(x, baseY);
-        ctx.lineTo(x, baseY - 9);
-        ctx.stroke();
+          for (let i = start; i <= i1; i += step) {
+            const x = nm2x(i);
+            const text = String(i);
+            ctx.save();
+            ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = 3;
+            ctx.strokeText(text, x, baseY - 12);
+            ctx.fillText(text, x, baseY - 12);
+            ctx.restore();
+          }
+        }
+      } else {
+        // coarse tiers: dynamic label skipping
+        const MIN_LABEL_PX = 36;
+        let labelStep = MAJOR;
+        while (pxPerNm * labelStep < MIN_LABEL_PX) labelStep *= 2;
 
-        // label (above tick)
-        if (nm % labelStep === 0) {
-          ctx.fillText(String(Math.round(nm)), x, baseY - 10);
+        let m0 = Math.ceil(view.xlo / MAJOR) * MAJOR;
+        for (let nm = m0; nm <= view.xhi + EPS; nm += MAJOR) {
+          if (Math.abs(nm % labelStep) < 1e-6) {
+            const x = nm2x(nm);
+            const txt = String(Math.round(nm));
+            ctx.save();
+            ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = 3;
+            ctx.strokeText(txt, x, baseY - 12);
+            ctx.fillText(txt, x, baseY - 12);
+            ctx.restore();
+          }
         }
       }
     }
@@ -691,30 +840,21 @@
 
     function applySelection() {
       const d = data[current]; if (!d) return;
-
-      const z = Number.isFinite(d.z) ? Number(d.z) : 0;
-      zInput.value = z.toFixed(4);
-
+      currentZ = Number.isFinite(+d.z) ? +d.z : 0;
+      zInput.value = String(currentZ);  // no toFixed()
       [view.xlo, view.xhi] = [VIS_MIN_NM, VIS_MAX_NM];
-
-      if (yScaleSel.value === 'abs') {
-        updateAbsYRange();                    // fixed Y window
-      } else {
+      if (yScaleSel.value === 'abs') updateAbsYRange();
+      else {
         const ft = transformFluxAuto(d.flux || []);
         const ql = percentile(ft, 0.01), qh = percentile(ft, 0.999);
         const span = qh - ql || 1;
         view.ylo = ql - 0.05 * span;
         view.yhi = qh + 0.25 * span;
       }
-
-      // cutout + caption
       const img = document.getElementById('cutout');
       img.src = (d.image && d.image.path) ? d.image.path : "";
-      const cutoutCaption = document.getElementById('cutoutCaption');
-      cutoutCaption.textContent = (d.name && String(d.name).trim()) ? d.name : (d.id || '');
-
-      drawLegend();
-      draw();
+      document.getElementById('cutoutCaption').textContent = (d.name?.trim?.() ? d.name : (d.id || ''));
+      hideResetButton(); drawLegend(); draw();
     }
 
     function updateHover(e) {
@@ -788,10 +928,10 @@
     function y2px(y) { const h = canvas.clientHeight; return h - (y - view.ylo) / (view.yhi - view.ylo) * h; }
 
     function drawLegend() {
-      const z = Number(zInput.value) || 0;
+      const z = currentZ;
       legend.textContent = REST_LINES.map(([lab, wlA]) => {
         const obsNm = ((modeSel.value === 'rest') ? wlA : wlA * (1 + z)) * A2NM;
-        return `${lab}: ${obsNm.toFixed(1)} nm`;
+        return `${lab}: ${obsNm.toFixed(2)} nm`; // show 0.01 nm if you like
       }).join('  |  ');
     }
 
@@ -808,11 +948,9 @@
       const w = canvas.clientWidth, h = canvas.clientHeight;
       const L = 40, R = w - 10, T = 10, B = h - 30, W = R - L, H = B - T;
 
-      const z = Number(zInput.value) || 0;
+      const z = currentZ;
       const mode = modeSel.value;
-
-      const wlA = d.wavelength_A;
-      const wlObsA = (mode === 'rest') ? wlA.map(w => w / (1 + z)) : wlA;
+      const wlObsA = (mode === 'rest') ? d.wavelength_A.map(w => w / (1 + z)) : d.wavelength_A;
       const X = wlObsA.map(w => w * A2NM); // nm
 
       const g = parseFloat(gain.value) || 1;
@@ -857,12 +995,13 @@
         ctx.strokeStyle = '#444'; ctx.fillStyle = '#888';
         ctx.textAlign = 'center'; ctx.textBaseline = 'top';
         ctx.font = '10px system-ui, sans-serif';
+        const labelTop = legendLabelTop(T);
         for (const [lab, wlA0] of REST_LINES) {
           const xObsNm = ((mode === 'rest') ? wlA0 : wlA0 * (1 + z)) * A2NM;
           if (xObsNm < view.xlo || xObsNm > view.xhi) continue;
           const px = x2(xObsNm);
           ctx.beginPath(); ctx.moveTo(px, T + 2); ctx.lineTo(px, B); ctx.stroke();
-          ctx.fillText(lab, px, T); ctx.fillText(`${xObsNm.toFixed(1)} nm`, px, T + 12);
+          ctx.fillText(lab, px, labelTop); ctx.fillText(`${xObsNm.toFixed(1)} nm`, px, labelTop + 12);
         }
       }
       // labels
@@ -893,10 +1032,7 @@
         ctx.lineTo(px, B);
         ctx.stroke();
 
-        // wavelength label (outlined for readability), same color as the line
-
-
-        // place label a bit above pointer, clamped inside plot
+        // label position: try to keep it fully visible in the plot
         const ly = Math.max(T + 12, Math.min(B - 12, (hoverYpx ?? B) - 10));
 
         // label above pointer
@@ -910,6 +1046,59 @@
         ctx.fillStyle = col;
         ctx.fillText(label, px, ly);
         ctx.restore();
+
+
+      }
+
+      if (resetBtnVisible) {
+        const pad = 10;
+        const { L, R, T, B } = getPlotRect();
+        const btnH = 26, btnPadX = 12, radius = 14;
+        const label = 'Reset display';
+
+        ctx.save();
+        ctx.font = '600 13px system-ui, sans-serif';
+        const textW = ctx.measureText(label).width;
+        const btnW = Math.round(textW + 2 * btnPadX);
+
+        // place aesthetically above/right of x-axis, clear of axes ticks
+        const x = R - btnW - pad;
+        const y = B - btnH - pad;
+
+        // rounded pill
+        ctx.beginPath();
+        const r = radius, w = btnW, h = btnH;
+        ctx.moveTo(x + r, y);
+        ctx.arcTo(x + w, y, x + w, y + h, r);
+        ctx.arcTo(x + w, y + h, x, y + h, r);
+        ctx.arcTo(x, y + h, x, y, r);
+        ctx.arcTo(x, y, x + w, y, r);
+        ctx.closePath();
+
+        // background with subtle shadow
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.shadowColor = 'rgba(0,0,0,0.6)';
+        ctx.shadowBlur = 6;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+
+        // border
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = '#3a3a3a';
+        ctx.stroke();
+
+        // text
+        ctx.fillStyle = '#e9f0ff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(label, x + w / 2, y + h / 2);
+
+        ctx.restore();
+
+        // record hitbox in CSS pixels
+        resetBtnRect = { x, y, w: btnW, h: btnH };
+      } else {
+        resetBtnRect = null;
       }
     }
 
@@ -918,9 +1107,18 @@
 
     // MOUSE
     canvas.addEventListener('mousedown', e => {
+      stopXInertia();
       const rect = canvas.getBoundingClientRect();
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
+      // check reset button hit
+      const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+      if (resetBtnRect && mx >= resetBtnRect.x && mx <= resetBtnRect.x + resetBtnRect.w
+        && my >= resetBtnRect.y && my <= resetBtnRect.y + resetBtnRect.h) {
+        e.preventDefault(); e.stopPropagation();
+        resetDisplay();
+        return;
+      }
 
       if (hitScaleAt(x, y)) {
         draggingScale = true;
@@ -950,10 +1148,15 @@
         lastX = e.clientX; lastY = e.clientY;
 
         const wx = view.xhi - view.xlo, wy = view.yhi - view.ylo;
-        const fx = -dx / canvas.clientWidth, fy = dy / canvas.clientHeight;
+        const fx = -dx / canvas.clientWidth;
         view.xlo += fx * wx; view.xhi += fx * wx;
-        if (yScaleSel.value !== 'abs') { view.ylo += fy * wy; view.yhi += fy * wy; }
+        if (yScaleSel.value !== 'abs') {
+          const raw = (dy / canvas.clientHeight) * wy * Y_MOUSE_SLOW;
+          const s = clampYPan(raw);
+          view.ylo += s; view.yhi += s;
+        }
         draw();
+        showResetButton();
       }
     });
 
@@ -971,14 +1174,30 @@
 
     // TOUCH START
     canvas.addEventListener('touchstart', e => {
+      stopXInertia();
       if (e.touches.length === 2) {
-        // start two-finger Y pan
         twoTouchActive = true;
-        draggingScale = false;                      // cancel any scale drag
+        draggingScale = false;                        // cancel any scale drag
+
+        // pan anchor (Y)
         twoTouchPrevY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+
+        // pinch anchor (X)
+        const rect = canvas.getBoundingClientRect();
+        const { L, R, W } = getPlotRect();
+        const mx = ((e.touches[0].clientX + e.touches[1].clientX) * 0.5) - rect.left;
+        const clampedX = Math.max(L, Math.min(R, mx));
+        const frac = (clampedX - L) / Math.max(1, W);
+        pinchAnchorNm = view.xlo + frac * (view.xhi - view.xlo);
+
+        // initial pinch distance
+        const dx = e.touches[0].clientX - e.touches[1].clientX;
+        const dy = e.touches[0].clientY - e.touches[1].clientY;
+        pinchPrevDist = Math.hypot(dx, dy);
         e.preventDefault();
         return;
       }
+
       if (e.touches.length === 1) {
         const rect = canvas.getBoundingClientRect();
         const t = e.touches[0];
@@ -993,17 +1212,41 @@
       }
     }, { passive: false });
 
-    // TOUCH MOVE
+    // TOUCH MOVE (simultaneous Y-pan + X-zoom)
     canvas.addEventListener('touchmove', e => {
       if (twoTouchActive && e.touches.length === 2) {
+        const rect = canvas.getBoundingClientRect();
+
+        // ----- Y PAN (two-finger drag) -----
         const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
         const dy = cy - twoTouchPrevY;
         twoTouchPrevY = cy;
+        if (yScaleSel.value !== 'abs') {
+          const ySpan = view.yhi - view.ylo;
+          const raw = (dy / canvas.clientHeight) * ySpan * Y_FINGER_SLOW;
+          const s = clampYPan(raw);
+          view.ylo += s; view.yhi += s;
+        }
 
-        const span = (view.yhi - view.ylo);
-        const frac = dy / canvas.clientHeight;
-        view.ylo += frac * span;
-        view.yhi += frac * span;
+
+        showResetButton();
+
+        // ----- X ZOOM (pinch) -----
+        const dx = e.touches[0].clientX - e.touches[1].clientX;
+        const dy2 = e.touches[0].clientY - e.touches[1].clientY;
+        const dist = Math.hypot(dx, dy2);
+        if (pinchPrevDist > 0 && dist > 0) {
+          const scale = dist / pinchPrevDist;       // >1 => fingers apart
+          pinchPrevDist = dist;
+          // zoom1D multiplies span by factor; bigger span = zoom out.
+          const factor = 1 / scale;                 // apart => zoom IN
+          let [lo, hi] = zoom1D(view.xlo, view.xhi, pinchAnchorNm, factor);
+          [lo, hi] = fitSpanToVisible(0.5 * (lo + hi), (hi - lo));
+          view.xlo = lo; view.xhi = hi;
+        } else {
+          pinchPrevDist = dist;
+        }
+
         draw();
         e.preventDefault();
         return;
@@ -1019,7 +1262,7 @@
         return;
       }
 
-      if (e.touches.length === 1) {  // hover only
+      if (e.touches.length === 1) {
         updateHover(e);
         draw();
         e.preventDefault();
@@ -1028,13 +1271,19 @@
 
     // TOUCH END/CANCEL
     canvas.addEventListener('touchend', e => {
-      if (e.touches.length < 2) { twoTouchActive = false; twoTouchPrevY = null; }
-      if (e.touches.length === 0) { draggingScale = false; }
+      if (e.touches.length < 2) {
+        twoTouchActive = false; twoTouchPrevY = null;
+        pinchPrevDist = 0; pinchAnchorNm = null;
+      }
+      if (e.touches.length === 0) draggingScale = false;
     }, { passive: true });
 
     canvas.addEventListener('touchcancel', () => {
-      twoTouchActive = false; twoTouchPrevY = null; draggingScale = false;
+      twoTouchActive = false; twoTouchPrevY = null;
+      pinchPrevDist = 0; pinchAnchorNm = null;
+      draggingScale = false;
     }, { passive: true });
+
 
     const MIN_X_SPAN = 5;      // nm
     const MIN_Y_SPAN = 0.02;   // display units after transform
@@ -1051,20 +1300,67 @@
       return [lo, hi];
     }
 
-    // Wheel: always pan Y (slowly)
-    canvas.addEventListener('wheel', e => {
+    function zoomXCentered(factor) {
+      const center = 0.5 * (view.xlo + view.xhi);
+      const span = (view.xhi - view.xlo) * factor;         // factor < 1 zoom in
+      const [lo, hi] = fitSpanToVisible(center, span);
+      view.xlo = lo; view.xhi = hi;
+      showResetButton();
+      draw();
+    }
+
+    function wheelZoomFactor(dy) {
+      // smooth, OS/device-independent-ish
+      // dy < 0 => zoom in (factor < 1), dy > 0 => zoom out
+      return Math.exp(dy * 0.0012);
+    }
+
+    canvas.addEventListener('wheel', (e) => {
+      // Zoom when ctrl or shift
+      if (e.ctrlKey || e.shiftKey) {
+        e.preventDefault();
+        stopXInertia();
+        zoomXCentered(Math.exp(e.deltaY * 0.0012));
+        return;
+      }
+
+      const absX = Math.abs(e.deltaX), absY = Math.abs(e.deltaY);
+      // Horizontal two-finger pan wins when it's dominant
+      if (absX > absY * 0.75 && absX > 0.5) {
+        e.preventDefault();
+        // immediate pan
+        const span = (view.xhi - view.xlo);
+        const nmPerPx = span / Math.max(1, canvas.clientWidth);
+        const dxNm = e.deltaX * nmPerPx;
+        view.xlo += dxNm; view.xhi += dxNm;
+        showResetButton();
+        draw();
+
+        // inertia: map deltaX to nm/ms
+        const vx = (e.deltaX / Math.max(1, canvas.clientWidth)) * span * X_GAIN;
+        startXInertia(vx);
+        return;
+      }
+
+      // Otherwise: vertical pan (slow)
       e.preventDefault();
-      const dir = Math.sign(e.deltaY);                  // down=+1, up=-1
-      const step = 0.03 * (view.yhi - view.ylo);        // 3% per tick
-      view.ylo += dir * step;
-      view.yhi += dir * step;
+      stopXInertia();
+      const ySpan = view.yhi - view.ylo;
+      const raw = Math.sign(e.deltaY) * ySpan * (Y_WHEEL_SLOW * 0.01);
+      const s = clampYPan(raw);
+      view.ylo += s; view.yhi += s;
+
+      showResetButton();
       draw();
     }, { passive: false });
+
+
 
 
     yScaleSel.addEventListener('change', () => {
       if (yScaleSel.value === 'abs') updateAbsYRange();
       else applySelection();
+      hideResetButton();
       draw();
     });
 
@@ -1076,9 +1372,13 @@
 
     function setStatus(msg) { statusEl.textContent = msg; }
 
-    objSel.addEventListener('change', () => { gain.value = 0.5; gainOut.textContent = "×0.50"; current = parseInt(objSel.value, 10); applySelection(); });
-    modeSel.addEventListener('change', () => { drawLegend(); draw(); });
-    applyZBtn.addEventListener('click', () => { drawLegend(); draw(); });
+    objSel.addEventListener('change', () => { gain.value = 0.5; gainOut.textContent = "×0.50"; current = parseInt(objSel.value, 10); applySelection(); hideResetButton(); });
+    modeSel.addEventListener('change', () => { hideResetButton(); drawLegend(); draw(); });
+    applyZBtn.addEventListener('click', () => {
+      const zVal = parseFloat(zInput.value);
+      currentZ = Number.isFinite(zVal) ? zVal : 0;
+      drawLegend(); draw();
+    });
     document.getElementById('open').addEventListener('click', () => fileIn.click());
     fileIn.addEventListener('change', async () => {
       const f = fileIn.files[0]; if (!f) return;
@@ -1406,7 +1706,7 @@
 
     const sidePanel = document.getElementById('sidePanel');
     const togglePanelBtn = document.getElementById('togglePanel');
-
+    document.addEventListener('keydown', e => { if (e.key.toLowerCase() === 'r') resetDisplay(); });
     const layout = document.querySelector('main.layout');
     function setPanelCollapsed(collapsed) {
       document.body.classList.toggle('panel-collapsed', collapsed);
