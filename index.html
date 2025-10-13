@@ -425,7 +425,8 @@
       //["[O III]", 4958.91],
       //["[O III]", 5006.84],
       ["Mg b", 5175.0],
-      ["Na D", 5891.58],
+      ["Na D1", 5889.90],
+      ["Na D2", 5895.90],
       ["Hα", 6562.80],
       //["[N II]", 6583.45],
       //["[S II]", 6716.44],
@@ -646,6 +647,17 @@
       if (!overlaps) return T;
       const gap = 6; // px padding under the legend
       return Math.max(T, Math.round(barRect.bottom - canRect.top + gap));
+    }
+
+    // Air ↔ vacuum index (Edlén/Peck; standard in SDSS/Morton)
+    function nAir(lamA) {
+      const s2 = (1e4 / lamA) ** 2;         // σ^2 in µm^-2
+      return 1 + 1e-8 * (6432.8 + 2949810 / (146.0 - s2) + 25540 / (41.0 - s2));
+    }
+    function airToVacAA(lamAir) {
+      let lam = lamAir;
+      for (let i = 0; i < 2; i++) lam = lamAir * nAir(lam);
+      return lam;
     }
 
     function getScaleTiers(pxPerNm) {
@@ -930,7 +942,8 @@
     function drawLegend() {
       const z = currentZ;
       legend.textContent = REST_LINES.map(([lab, wlA]) => {
-        const obsNm = ((modeSel.value === 'rest') ? wlA : wlA * (1 + z)) * A2NM;
+        const restVacA = airToVacAA(wlA);
+        const obsNm = ((modeSel.value === 'rest') ? restVacA : restVacA * (1 + z)) * A2NM;
         return `${lab}: ${obsNm.toFixed(2)} nm`; // show 0.01 nm if you like
       }).join('  |  ');
     }
@@ -997,7 +1010,8 @@
         ctx.font = '10px system-ui, sans-serif';
         const labelTop = legendLabelTop(T);
         for (const [lab, wlA0] of REST_LINES) {
-          const xObsNm = ((mode === 'rest') ? wlA0 : wlA0 * (1 + z)) * A2NM;
+          const restVacA = airToVacAA(wlA0);
+          const xObsNm = ((mode === 'rest') ? restVacA : restVacA * (1 + z)) * A2NM;
           if (xObsNm < view.xlo || xObsNm > view.xhi) continue;
           const px = x2(xObsNm);
           ctx.beginPath(); ctx.moveTo(px, T + 2); ctx.lineTo(px, B); ctx.stroke();
