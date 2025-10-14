@@ -425,8 +425,8 @@
       //["[O III]", 4958.91],
       //["[O III]", 5006.84],
       ["Mg b", 5175.0],
-      ["Na D1", 5889.90],
-      ["Na D2", 5895.90],
+      ["Na D\u2081", 5889.90],
+      ["Na D\u2082", 5895.90],
       ["Hα", 6562.80],
       //["[N II]", 6583.45],
       //["[S II]", 6716.44],
@@ -524,6 +524,18 @@
       return Math.max(smin, Math.min(smax, rawShift));
     }
 
+    // Collision-aware row layout for vertical line labels
+    function layoutLineRows(items, gapPx, maxRows) {
+      // items: [{px, ...}] sorted by px asc
+      const lastX = Array(maxRows).fill(-Infinity);
+      for (const it of items) {
+        let r = 0;
+        while (r < maxRows && (it.px - lastX[r]) < gapPx) r++;
+        if (r >= maxRows) r = maxRows - 1;   // clamp to last row if crowded
+        it.row = r;
+        lastX[r] = it.px;
+      }
+    }
 
     function resetDisplay() {
       stopXInertia();
@@ -1003,21 +1015,39 @@
         pxPrev = px; pyPrev = py; nmPrev = nm;
       }
 
-      // rest lines + labels (symbol top, nm below)
+      // rest lines + labels (collision-aware stacking)
       if (showLines.checked) {
         ctx.strokeStyle = '#444'; ctx.fillStyle = '#888';
         ctx.textAlign = 'center'; ctx.textBaseline = 'top';
         ctx.font = '10px system-ui, sans-serif';
+
         const labelTop = legendLabelTop(T);
+        const rowH = 24;                               // pixels between stacked rows
+        const maxRows = Math.max(1, Math.floor((B - labelTop - 20) / rowH));
+        const gapPx = 40;                               // min horizontal gap to reuse a row
+
+        // collect visible lines first
+        const items = [];
         for (const [lab, wlA0] of REST_LINES) {
           const restVacA = airToVacAA(wlA0);
           const xObsNm = ((mode === 'rest') ? restVacA : restVacA * (1 + z)) * A2NM;
           if (xObsNm < view.xlo || xObsNm > view.xhi) continue;
           const px = x2(xObsNm);
-          ctx.beginPath(); ctx.moveTo(px, T + 2); ctx.lineTo(px, B); ctx.stroke();
-          ctx.fillText(lab, px, labelTop); ctx.fillText(`${xObsNm.toFixed(1)} nm`, px, labelTop + 12);
+          items.push({ lab, nm: xObsNm, px });
+        }
+        // left→right and assign stacking rows to avoid overlap (e.g., Na D1/D2)
+        items.sort((a, b) => a.px - b.px);
+        layoutLineRows(items, gapPx, maxRows);
+
+        // draw
+        for (const it of items) {
+          const y0 = labelTop + it.row * rowH;
+          ctx.beginPath(); ctx.moveTo(it.px, T + 2); ctx.lineTo(it.px, B); ctx.stroke();
+          ctx.fillText(it.lab, it.px, y0);
+          ctx.fillText(`${it.nm.toFixed(1)} nm`, it.px, y0 + 12);
         }
       }
+
       // labels
       ctx.fillStyle = '#aaa';
       ctx.textAlign = 'left'; ctx.fillText('Flux (arb.)', L - 32, T + 14);
