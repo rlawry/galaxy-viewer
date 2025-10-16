@@ -308,111 +308,6 @@
         max-height: 0;
       }
     }
-
-    header.toolbar {
-      flex-wrap: wrap;
-      /* allow wrapping */
-      row-gap: 10px;
-      /* tidy vertical spacing */
-    }
-
-    /* Title on its own row when cramped */
-    @media (max-width: 900px) {
-      header.toolbar .title {
-        flex: 1 1 100%;
-        order: 0;
-      }
-
-      /* Make each control block responsive, two per row by default */
-      header.toolbar .group,
-      header.toolbar>label.group,
-      header.toolbar button,
-      header.toolbar details.more {
-        flex: 1 1 220px;
-        /* grows, wraps at ~220px */
-        min-width: 0;
-        /* prevent overflow */
-      }
-
-      /* Stack label above control for readability */
-      header.toolbar .group label {
-        display: block;
-        margin: 0 0 4px;
-        font-size: 11px;
-        color: #aaa;
-      }
-
-      /* Inputs span full width inside their block */
-      header.toolbar select,
-      header.toolbar input[type="number"],
-      header.toolbar input[type="range"],
-      header.toolbar button {
-        width: 100%;
-      }
-
-      /* Compact control padding on small screens */
-      header.toolbar select,
-      header.toolbar input,
-      header.toolbar button {
-        padding: 6px 8px;
-      }
-
-      /* Keep toggles and the map button compact */
-      #showMap,
-      #togglePanel.icon-btn {
-        flex: 0 0 auto;
-      }
-
-      /* "More" becomes a full-width drawer row */
-      details.more {
-        order: 99;
-        margin-left: 0;
-        flex: 1 1 100%;
-      }
-
-      /* Reduce crowding: hide live gain badge on small screens */
-      #gainOut {
-        display: none;
-      }
-    }
-
-    /* Extra-small phones: tighter grid */
-    @media (max-width: 520px) {
-
-      header.toolbar .group,
-      header.toolbar>label.group,
-      header.toolbar button {
-        flex: 1 1 48%;
-        /* two columns */
-      }
-
-      /* Let very small items keep their natural size */
-      #showMap,
-      #togglePanel.icon-btn {
-        flex: 0 0 auto;
-      }
-
-      /* Slightly smaller control chrome */
-      header.toolbar select,
-      header.toolbar input,
-      header.toolbar button {
-        border-radius: 6px;
-        padding: 5px 7px;
-        font-size: 14px;
-      }
-    }
-
-    /* Prevent long option text from blowing up layout */
-    header.toolbar select {
-      max-width: 100%;
-      text-overflow: ellipsis;
-    }
-
-    /* Checkbox rows look like other groups */
-    header.toolbar>label.group {
-      align-items: center;
-      gap: 6px;
-    }
   </style>
 
   <header class="toolbar">
@@ -445,12 +340,9 @@
       <output id="gainOut" class="pill">×0.50</output>
     </div>
 
-    <label class="group" style="gap:6px;"><input id="showLines" type="checkbox"> Show Element Guidelines</label>
+    <label class="group" style="gap:6px;"><input id="showLines" type="checkbox"> Show lines</label>
 
     <button id="showMap">Sky map</button>
-    <label class="group" style="gap:6px;">
-      <input id="spectro" type="checkbox"> Spectroscope view
-    </label>
 
     <details class="more">
       <summary>More</summary>
@@ -1023,67 +915,6 @@
       return [lo, hi];
     }
 
-    function lowerBound(a, x) { // first i with a[i] >= x
-      let lo = 0, hi = a.length;
-      while (lo < hi) { const mid = (lo + hi) >> 1; (a[mid] < x) ? lo = mid + 1 : hi = mid; }
-      return lo;
-    }
-    function sampleLinear(Xnm, Y, nm) {
-      if (!Xnm.length) return 0;
-      if (nm <= Xnm[0]) return Y[0];
-      if (nm >= Xnm[Xnm.length - 1]) return Y[Y.length - 1];
-      const i = Math.max(1, lowerBound(Xnm, nm));
-      const x0 = Xnm[i - 1], x1 = Xnm[i], t = (nm - x0) / Math.max(1e-9, x1 - x0);
-      return Y[i - 1] * (1 - t) + Y[i] * t;
-    }
-
-    function drawSpectroscope(L, R, T, B, W, H, Xnm, Ft) {
-      // normalize contrast
-      const ql = percentile(Ft, 0.10), qh = percentile(Ft, 0.995);
-      const span = Math.max(1e-9, qh - ql);
-
-      const nmLo = view.xlo, nmHi = view.xhi, nmSpan = nmHi - nmLo;
-
-      // render a single 1-pixel-tall strip in device pixels, then scale up
-      const dpr = window.devicePixelRatio || 1;
-      const wpx = Math.max(1, Math.floor(W * dpr));
-
-      const off = drawSpectroscope._off || (drawSpectroscope._off = document.createElement('canvas'));
-      off.width = wpx; off.height = 1;
-      const octx = off.getContext('2d', { willReadFrequently: true });
-      const img = octx.createImageData(wpx, 1);
-      const buf = img.data;
-
-      for (let x = 0; x < wpx; x++) {
-        const frac = x / Math.max(1, wpx - 1);
-        const nm = nmLo + frac * nmSpan;
-
-        // sample flux and map to 0..1 intensity
-        let v = (sampleLinear(Xnm, Ft, nm) - ql) / span;
-        if (v < 0) v = 0; else if (v > 1) v = 1;
-
-        // wavelength color, then modulate RGB by intensity (opaque alpha)
-        const [r, g, b] = wavelengthToRGB(nm);
-        const k = 0.08 + 0.92 * v;            // contrast floor
-        const i = x * 4;
-        buf[i + 0] = Math.round(r * k);
-        buf[i + 1] = Math.round(g * k);
-        buf[i + 2] = Math.round(b * k);
-        buf[i + 3] = 255;                     // opaque avoids edge blending seams
-      }
-
-      octx.putImageData(img, 0, 0);
-
-      const prevSmooth = ctx.imageSmoothingEnabled;
-      ctx.imageSmoothingEnabled = false;      // pixel-perfect upscaling
-      ctx.drawImage(off, L, T, W, H);
-      ctx.imageSmoothingEnabled = prevSmooth;
-
-      // bezel
-      ctx.strokeStyle = '#222'; ctx.lineWidth = 1;
-      ctx.strokeRect(L + 0.5, T + 0.5, W - 1, H - 1);
-    }
-
     function wavelengthToRGB(nm) {
       // 380–780 nm -> [r,g,b] in 0–255
       let r = 0, g = 0, b = 0, a = 1, t = 0, wl = nm;
@@ -1149,14 +980,9 @@
 
       const g = parseFloat(gain.value) || 1;
       const fl = (yScaleSel.value === 'abs')
-        ? transformFluxAbsBase(d.flux).map(v => v * g)   // slider acts here (chart)
-        : transformFluxAuto(d.flux);                      // chart (auto) ignores gain by design
+        ? transformFluxAbsBase(d.flux).map(v => v * g)   // slider acts here
+        : transformFluxAuto(d.flux);
 
-      // spectroscope needs gain regardless of Y mode
-      const flSpectro = (yScaleSel.value === 'abs'
-        ? transformFluxAbsBase(d.flux)
-        : transformFluxAuto(d.flux)
-      ).map(v => v * g);
 
       // mappers over the plotting rect
       const x2 = x => L + (x - view.xlo) / (view.xhi - view.xlo) * W;
@@ -1164,42 +990,34 @@
 
       ctx.clearRect(0, 0, w, h);
 
-      // --- branch: spectroscope vs chart ---
-      if (spectroChk && spectroChk.checked) {
-        // spectroscope strip (no axes, no draggable scale)
-        drawSpectroscope(L, R, T, B, W, H, X, flSpectro);
-      } else {
-        // axes
-        ctx.lineWidth = 1; ctx.strokeStyle = '#333';
-        ctx.beginPath(); ctx.moveTo(L, T); ctx.lineTo(L, B); ctx.lineTo(R, B); ctx.stroke();
+      // axes
+      ctx.lineWidth = 1; ctx.strokeStyle = '#333';
+      ctx.beginPath(); ctx.moveTo(L, T); ctx.lineTo(L, B); ctx.lineTo(R, B); ctx.stroke();
 
-        // wavelength scale (draggable baseline)
-        drawWavelengthScale(L, R, T, B, W);
+      // wavelength scale (draggable baseline)
+      drawWavelengthScale(L, R, T, B, W);
 
-        // spectrum with wavelength-colored segments, clipped to visible band
-        let pxPrev = null, pyPrev = null, nmPrev = null;
-        const STEP = 1;
-        for (let i = 0; i < X.length; i += STEP) {
-          const nm = X[i];
-          if (nm < view.xlo || nm > view.xhi) { pxPrev = pyPrev = nmPrev = null; continue; }
-          const px = x2(nm);
-          const py = y2(fl[i]);
+      // spectrum with wavelength-colored segments, clipped to visible band
+      let pxPrev = null, pyPrev = null, nmPrev = null;
+      const STEP = 1;
+      for (let i = 0; i < X.length; i += STEP) {
+        const nm = X[i];
+        if (nm < view.xlo || nm > view.xhi) { pxPrev = pyPrev = nmPrev = null; continue; }
+        const px = x2(nm);
+        const py = y2(fl[i]);
 
-          if (pxPrev !== null) {
-            const nmMid = 0.5 * (nmPrev + nm);
-            const [r, gch, b] = wavelengthToRGB(nmMid);
-            ctx.strokeStyle = rgb(r, gch, b);
-            ctx.beginPath(); ctx.moveTo(pxPrev, pyPrev); ctx.lineTo(px, py); ctx.stroke();
-          }
-          pxPrev = px; pyPrev = py; nmPrev = nm;
+        if (pxPrev !== null) {
+          const nmMid = 0.5 * (nmPrev + nm);
+          const [r, g, b] = wavelengthToRGB(nmMid);
+          ctx.strokeStyle = rgb(r, g, b);
+          ctx.beginPath(); ctx.moveTo(pxPrev, pyPrev); ctx.lineTo(px, py); ctx.stroke();
         }
+        pxPrev = px; pyPrev = py; nmPrev = nm;
       }
 
       // rest lines + labels (collision-aware stacking)
       if (showLines.checked) {
-        const spectro = !!(spectroChk && spectroChk.checked);
-        ctx.strokeStyle = spectro ? 'rgba(255,255,255,0.35)' : '#444';
-        ctx.fillStyle = spectro ? 'rgba(230,230,230,0.95)' : '#888';
+        ctx.strokeStyle = '#444'; ctx.fillStyle = '#888';
         ctx.textAlign = 'center'; ctx.textBaseline = 'top';
         ctx.font = '10px system-ui, sans-serif';
 
@@ -1217,7 +1035,7 @@
           const px = x2(xObsNm);
           items.push({ lab, nm: xObsNm, px });
         }
-        // left→right and assign stacking rows to avoid overlap (e.g., Na D₁/D₂)
+        // left→right and assign stacking rows to avoid overlap (e.g., Na D1/D2)
         items.sort((a, b) => a.px - b.px);
         layoutLineRows(items, gapPx, maxRows);
 
@@ -1230,12 +1048,10 @@
         }
       }
 
-      // axis labels only for chart mode
-      if (!(spectroChk && spectroChk.checked)) {
-        ctx.fillStyle = '#aaa';
-        ctx.textAlign = 'left'; ctx.fillText('Flux (arb.)', L - 32, T + 14);
-        ctx.textAlign = 'right'; ctx.fillText(mode === 'rest' ? 'Rest wavelength (nm)' : 'Observed wavelength (nm)', R, B + 6);
-      }
+      // labels
+      ctx.fillStyle = '#aaa';
+      ctx.textAlign = 'left'; ctx.fillText('Flux (arb.)', L - 32, T + 14);
+      ctx.textAlign = 'right'; ctx.fillText(mode === 'rest' ? 'Rest wavelength (nm)' : 'Observed wavelength (nm)', R, B + 6);
 
       // --- hover measuring line ---
       if (hoverNm !== null && hoverNm >= view.xlo && hoverNm <= view.xhi) {
@@ -1244,24 +1060,38 @@
         const x2 = x => L + (x - view.xlo) / (view.xhi - view.xlo) * W;
 
         const px = x2(hoverNm);
-        const [r, gch, b] = wavelengthToRGB(hoverNm);
-        const col = `rgb(${r},${gch},${b})`;
+
+        const [r, g, b] = wavelengthToRGB(hoverNm);
+        const col = `rgb(${r},${g},${b})`;
 
         ctx.save();
+
+        // colored vertical line with a soft glow
         ctx.strokeStyle = col;
         ctx.lineWidth = 1;
-        ctx.shadowColor = `rgba(${r},${gch},${b},0.6)`;
+        ctx.shadowColor = `rgba(${r},${g},${b},0.6)`;
         ctx.shadowBlur = 6;
-        ctx.beginPath(); ctx.moveTo(px, T + 2); ctx.lineTo(px, B); ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(px, T + 2);
+        ctx.lineTo(px, B);
+        ctx.stroke();
 
+        // label position: try to keep it fully visible in the plot
         const ly = Math.max(T + 12, Math.min(B - 12, (hoverYpx ?? B) - 10));
+
+        // label above pointer
         const label = `${hoverNm.toFixed(1)} nm`;
         ctx.font = 'bold 14px system-ui, sans-serif';
-        ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-        ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.65)';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = 'rgba(0,0,0,0.65)';
         ctx.strokeText(label, px, ly);
-        ctx.fillStyle = col; ctx.fillText(label, px, ly);
+        ctx.fillStyle = col;
+        ctx.fillText(label, px, ly);
         ctx.restore();
+
+
       }
 
       if (resetBtnVisible) {
@@ -1275,9 +1105,11 @@
         const textW = ctx.measureText(label).width;
         const btnW = Math.round(textW + 2 * btnPadX);
 
+        // place aesthetically above/right of x-axis, clear of axes ticks
         const x = R - btnW - pad;
         const y = B - btnH - pad;
 
+        // rounded pill
         ctx.beginPath();
         const r = radius, w = btnW, h = btnH;
         ctx.moveTo(x + r, y);
@@ -1287,16 +1119,19 @@
         ctx.arcTo(x, y, x + w, y, r);
         ctx.closePath();
 
+        // background with subtle shadow
         ctx.fillStyle = 'rgba(0,0,0,0.55)';
         ctx.shadowColor = 'rgba(0,0,0,0.6)';
         ctx.shadowBlur = 6;
         ctx.fill();
         ctx.shadowBlur = 0;
 
+        // border
         ctx.lineWidth = 1;
         ctx.strokeStyle = '#3a3a3a';
         ctx.stroke();
 
+        // text
         ctx.fillStyle = '#e9f0ff';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
@@ -1304,15 +1139,13 @@
 
         ctx.restore();
 
+        // record hitbox in CSS pixels
         resetBtnRect = { x, y, w: btnW, h: btnH };
       } else {
         resetBtnRect = null;
       }
     }
 
-    // Event listeners
-    const spectroChk = document.getElementById('spectro');
-    spectroChk.addEventListener('change', () => { hideResetButton(); draw(); });
 
     let draggingPlot = false, lastX = 0, lastY = 0;
 
