@@ -943,10 +943,44 @@
       return rows.map(r => r.i);
     }
 
+    function canonicalizeSpectrum(o) {
+      // wavelengths → Å
+      let wA =
+        Array.isArray(o.wavelength_A) ? o.wavelength_A :
+          Array.isArray(o.wavelength_nm) ? o.wavelength_nm.map(x => x * 10) :
+            (o.stitched && Array.isArray(o.stitched.wavelength_nm)) ? o.stitched.wavelength_nm.map(x => x * 10) :
+              (o.spectrum && Array.isArray(o.spectrum.wavelength_A)) ? o.spectrum.wavelength_A :
+                [];
+
+      // flux → arbitrary units (prefer SDSS-scaled if present)
+      let f =
+        Array.isArray(o.flux_sdss) ? o.flux_sdss :
+          (o.stitched && Array.isArray(o.stitched.flux_sdss)) ? o.stitched.flux_sdss :
+            Array.isArray(o.flux) ? o.flux :
+              (o.stitched && Array.isArray(o.stitched.flux)) ? o.stitched.flux :
+                (o.spectrum && Array.isArray(o.spectrum.flux)) ? o.spectrum.flux :
+                  [];
+
+      // length align
+      const n = Math.min(wA.length, f.length);
+      if (n > 0) { wA = wA.slice(0, n); f = f.slice(0, n); } else { wA = []; f = []; }
+
+      // image fallback
+      const image = o.image || (o.sdss_image ? { path: o.sdss_image } : null);
+
+      return {
+        ...o,
+        wavelength_A: wA,
+        flux: f,
+        image
+      };
+    }
+
     function loadJSON(obj) {
       // apply deterministic shuffle
       const order = stableShuffleOrder(obj);
-      data = order.map(i => obj[i]);
+      data = order.map(i => canonicalizeSpectrum(obj[i]))
+        .filter(d => d.wavelength_A.length && d.flux.length);
 
       objSel.innerHTML = '';
       data.forEach((d, i) => {
@@ -1193,7 +1227,6 @@
           }
           pxPrev = px; pyPrev = py; nmPrev = nm;
         }
-        pxPrev = px; pyPrev = py; nmPrev = nm;
       }
 
       // rest lines + labels (collision-aware stacking)
@@ -1612,10 +1645,48 @@
       catch (err) { setStatus('Invalid JSON: ' + err.message); }
     });
 
-    fetch('spectra.json').then(r => {
-      if (!r.ok) throw new Error('no spectra.json'); return r.json();
-    }).then(obj => { loadJSON(obj); setStatus('Loaded spectra.json'); })
-      .catch(() => setStatus('No local spectra.json. Use Open JSON.'));
+    fetch('spectra.json')
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then(rec => {
+        let arr;
+        if (Array.isArray(rec)) {
+          // New writer: already an array of spectra (has wavelength_A or wavelength_nm)
+          arr = rec;
+        } else {
+          // Old writer: single record with stitched or segments
+          const img = rec.image || (rec.sdss_image ? { path: 'm31_stis_optical_json/' + rec.sdss_image } : null);
+          if (rec.stitched && (rec.stitched.wavelength_A || rec.stitched.wavelength_nm)) {
+            arr = [{
+              id: rec.name || 'obj-0',
+              name: rec.name || 'Object',
+              wavelength_A: rec.stitched.wavelength_A || rec.stitched.wavelength_nm.map(nm => nm * 10),
+              flux_sdss: rec.stitched.flux_sdss,
+              flux: rec.stitched.flux,
+              image: img,
+              ra_deg: rec.ra_deg, dec_deg: rec.dec_deg, z: rec.z || 0
+            }];
+          } else if (Array.isArray(rec.segments)) {
+            arr = rec.segments.map((s, i) => ({
+              id: s.id || s.obsid || `seg-${i}`,
+              name: `${rec.name || 'Object'} ${s.grating || ''}`.trim(),
+              wavelength_A: s.wavelength_A || (s.wavelength_nm || []).map(nm => nm * 10),
+              flux_sdss: s.flux_sdss,
+              flux: s.flux,
+              image: img,
+              ra_deg: rec.ra_deg, dec_deg: rec.dec_deg, z: rec.z || 0
+            }));
+          } else {
+            throw new Error('no usable spectra in JSON');
+          }
+        }
+        loadJSON(arr);
+        setStatus(`Loaded ${arr.length} spectrum(s)`);
+      })
+      .catch(e => setStatus('Load failed: ' + e.message));
+
 
     const showLines = document.getElementById('showLines');
     showLines.addEventListener('change', draw);
