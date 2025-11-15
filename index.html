@@ -293,6 +293,24 @@
       transform: translateY(1px);
     }
 
+    footer {
+      display: block;
+      padding: 6px 12px;
+      font-size: 11px;
+      background: #050505;
+      border-top: 1px solid #222;
+      color: #aaa;
+    }
+
+    footer a {
+      color: #9ecbff;
+      text-decoration: none;
+    }
+
+    footer a:hover {
+      text-decoration: underline;
+    }
+
     /* Responsive */
     @media (max-width: 900px) {
       main.layout {
@@ -489,10 +507,36 @@
           <li>Tap/hover to read wavelength; vertical color line matches spectrum color.</li>
         </ul>
       </div>
+
+      <div class="card">
+        <h3>Data sources &amp; citations</h3>
+        <p style="margin:0 0 4px; font-size:12px; color:#ccc;">
+          Galaxy spectra shown here are based on public data from the
+          Sloan Digital Sky Survey (SDSS).
+        </p>
+        <p style="margin:0; font-size:11px; color:#9aa;">
+          For research use, please cite the appropriate SDSS survey and data-release
+          papers as described on the SDSS
+          <a href="https://www.sdss.org/collaboration/citing-sdss/" target="_blank" rel="noopener">“How to Cite
+            SDSS”</a> page.
+        </p>
+      </div>
     </aside>
   </main>
 
-  <footer></footer>
+  <footer>
+    <span>
+      Spectral data used in this viewer are drawn from the Sloan Digital Sky Survey (SDSS).
+    </span>
+    &nbsp;·&nbsp;
+    <a href="https://www.sdss.org" target="_blank" rel="noopener">
+      SDSS website
+    </a>
+    &nbsp;·&nbsp;
+    <a href="https://www.sdss.org/collaboration/citing-sdss/" target="_blank" rel="noopener">
+      How to cite SDSS data
+    </a>
+  </footer>
   <input type='file' id='file' accept='.json' style='display:none'>
   <script>
     const canvas = document.getElementById('canvas');
